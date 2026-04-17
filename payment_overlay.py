@@ -1,0 +1,255 @@
+"""
+收费弹窗模块 - 全屏置顶的收费明细界面
+功能：
+1. 全屏置顶显示
+2. 显示使用时长、计时单价、合计金额
+3. 显示收款码图片
+4. "确认收款"按钮（管理员操作）
+5. 弹窗期间锁定像素蛋糕窗口
+"""
+
+import os
+
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QFrame, QApplication
+)
+
+try:
+    import win32gui
+    import win32con
+    HAS_WIN32 = True
+except ImportError:
+    HAS_WIN32 = False
+
+
+class PaymentOverlay(QWidget):
+    """全屏置顶收费弹窗"""
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self._config = config
+        self._locked_hwnd = None
+        self._keep_top_timer = QTimer(self)
+        self._keep_top_timer.setInterval(500)
+        self._keep_top_timer.timeout.connect(self._keep_on_top)
+
+        self._init_ui()
+
+    def _init_ui(self):
+        """初始化界面"""
+        # 窗口属性：全屏、置顶、无边框
+        self.setWindowFlags(
+            Qt.Window |  # 独立窗口
+            Qt.FramelessWindowHint |  # 无边框
+            Qt.WindowStaysOnTopHint |  # 置顶
+            Qt.Tool  # 不在任务栏显示
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 230);")
+
+        # 主布局
+        layout = QVBoxLayout(self)
+        layout.setSpacing(30)
+        layout.setContentsMargins(80, 60, 80, 60)
+
+        # 标题
+        title_label = QLabel("使 用 计 费")
+        title_label.setFont(QFont("Microsoft YaHei", 48, QFont.Bold))
+        title_label.setStyleSheet("color: #FFD700;")
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+
+        # 分隔线
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setStyleSheet("color: #555555; background-color: #555555; max-height: 2px;")
+        layout.addWidget(line)
+
+        # 信息区域
+        info_layout = QHBoxLayout()
+        info_layout.setSpacing(60)
+
+        # 左侧：计费信息
+        info_container = QVBoxLayout()
+        info_container.setSpacing(20)
+
+        self._time_label = QLabel("使用时长：--")
+        self._time_label.setFont(QFont("Microsoft YaHei", 28))
+        self._time_label.setStyleSheet("color: #FFFFFF;")
+        info_container.addWidget(self._time_label)
+
+        self._rate_label = QLabel("计时单价：-- 元/分钟")
+        self._rate_label.setFont(QFont("Microsoft YaHei", 28))
+        self._rate_label.setStyleSheet("color: #FFFFFF;")
+        info_container.addWidget(self._rate_label)
+
+        self._amount_label = QLabel("合计金额：¥ --")
+        self._amount_label.setFont(QFont("Microsoft YaHei", 36, QFont.Bold))
+        self._amount_label.setStyleSheet("color: #FF6B6B;")
+        info_container.addWidget(self._amount_label)
+
+        # 提示
+        hint_label = QLabel("请扫码支付，支付完成后由管理员确认")
+        hint_label.setFont(QFont("Microsoft YaHei", 20))
+        hint_label.setStyleSheet("color: #AAAAAA;")
+        info_container.addWidget(hint_label)
+
+        info_layout.addLayout(info_container, stretch=3)
+
+        # 右侧：收款码
+        qr_container = QVBoxLayout()
+        qr_container.setAlignment(Qt.AlignCenter)
+
+        qr_title = QLabel("扫码支付")
+        qr_title.setFont(QFont("Microsoft YaHei", 24))
+        qr_title.setStyleSheet("color: #FFFFFF;")
+        qr_title.setAlignment(Qt.AlignCenter)
+        qr_container.addWidget(qr_title)
+
+        self._qr_label = QLabel()
+        self._qr_label.setFixedSize(300, 300)
+        self._qr_label.setStyleSheet(
+            "background-color: white; border-radius: 10px; padding: 10px;"
+        )
+        self._qr_label.setAlignment(Qt.AlignCenter)
+        self._qr_label.setScaledContents(True)
+        qr_container.addWidget(self._qr_label, alignment=Qt.AlignCenter)
+
+        info_layout.addLayout(qr_container, stretch=2)
+        layout.addLayout(info_layout)
+
+        # 确认收款按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self._confirm_btn = QPushButton("已付款 · 确认收款")
+        self._confirm_btn.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
+        self._confirm_btn.setFixedSize(400, 80)
+        self._confirm_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 15px 40px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+            QPushButton:pressed {
+                background-color: #3d8b40;
+            }
+        """)
+        btn_layout.addWidget(self._confirm_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+        # 底部提示
+        footer = QLabel("⚠ 支付完成后请告知工作人员确认收款")
+        footer.setFont(QFont("Microsoft YaHei", 16))
+        footer.setStyleSheet("color: #888888;")
+        footer.setAlignment(Qt.AlignCenter)
+        layout.addWidget(footer)
+
+    def show_payment(self, minutes: int, rate: float, hwnd=None):
+        """
+        显示收费弹窗
+        :param minutes: 使用分钟数
+        :param rate: 计时单价
+        :param hwnd: 要锁定的窗口句柄
+        """
+        # 锁定目标窗口
+        if hwnd and HAS_WIN32:
+            self._locked_hwnd = hwnd
+            try:
+                win32gui.EnableWindow(hwnd, False)
+            except Exception:
+                pass
+
+        # 更新显示
+        self._time_label.setText(f"使用时长：{minutes} 分钟")
+        self._rate_label.setText(f"计时单价：{rate:.2f} 元/分钟")
+
+        total = minutes * rate
+        self._amount_label.setText(f"合计金额：¥ {total:.2f}")
+
+        # 加载收款码
+        self._load_qr_code()
+
+        # 全屏显示
+        screen = QApplication.primaryScreen()
+        if screen:
+            self.setGeometry(screen.geometry())
+
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+        # 启动置顶保持定时器
+        self._keep_top_timer.start()
+
+    def _load_qr_code(self):
+        """加载收款码图片"""
+        qr_path = self._config.qr_code_path
+        if qr_path and os.path.exists(qr_path):
+            pixmap = QPixmap(qr_path)
+            if not pixmap.isNull():
+                # 缩放到固定大小，保持宽高比
+                scaled = pixmap.scaled(
+                    280, 280,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                self._qr_label.setPixmap(scaled)
+                return
+
+        # 没有收款码时显示占位图
+        self._show_placeholder_qr()
+
+    def _show_placeholder_qr(self):
+        """显示收款码占位图"""
+        pixmap = QPixmap(280, 280)
+        pixmap.fill(QColor(255, 255, 255))
+        painter = QPainter(pixmap)
+        painter.setFont(QFont("Microsoft YaHei", 16))
+        painter.setPen(QColor(150, 150, 150))
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, "请设置收款码")
+        painter.end()
+        self._qr_label.setPixmap(pixmap)
+
+    def _keep_on_top(self):
+        """保持窗口置顶（防止被其他窗口抢占焦点）"""
+        if self.isVisible():
+            self.raise_()
+            self.activateWindow()
+
+    def close_payment(self):
+        """关闭收费弹窗并解锁目标窗口"""
+        self._keep_top_timer.stop()
+
+        # 解锁目标窗口
+        if self._locked_hwnd and HAS_WIN32:
+            try:
+                win32gui.EnableWindow(self._locked_hwnd, True)
+            except Exception:
+                pass
+            self._locked_hwnd = None
+
+        self.hide()
+
+    def keyPressEvent(self, event):
+        """禁用 ESC 等快捷键关闭弹窗"""
+        # 不允许通过键盘关闭弹窗，只有点击"确认收款"才能关闭
+        pass
+
+    def closeEvent(self, event):
+        """禁止通过关闭按钮关闭"""
+        event.ignore()
+
+    @property
+    def confirm_button(self) -> QPushButton:
+        """获取确认收款按钮的引用"""
+        return self._confirm_btn

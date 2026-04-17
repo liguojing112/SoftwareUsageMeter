@@ -1,0 +1,5 @@
+PyQt5>=5.15
+psutil>=5.9
+pywin32>=306
+Pillow>=10.0
+pyinstaller>=6.0
