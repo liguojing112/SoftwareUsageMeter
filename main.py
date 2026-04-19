@@ -10,11 +10,14 @@
 import sys
 import os
 import logging
+import signal
+import traceback
 
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
 from config_manager import ConfigManager
-from process_monitor import ProcessMonitor
+from process_monitor import ProcessMonitor, recover_process_windows
 from timer_manager import TimerManager
 from payment_overlay import PaymentOverlay
 from admin_panel import PasswordDialog, AdminPanel
@@ -54,6 +57,13 @@ class Application:
         # 状态
         self._is_exporting = False
         self._payment_confirmed = False
+        self._cleanup_done = False
+        self._quit_requested = False
+        self._original_excepthook = sys.excepthook
+        self._original_sigint_handler = signal.getsignal(signal.SIGINT)
+        self._signal_pump_timer = QTimer(self._app)
+        self._signal_pump_timer.setInterval(200)
+        self._signal_pump_timer.timeout.connect(lambda: None)
 
         # 连接信号
         self._connect_signals()
@@ -65,6 +75,10 @@ class Application:
 
     def _connect_signals(self):
         """连接所有信号/槽"""
+        self._app.aboutToQuit.connect(self._cleanup_before_exit)
+        sys.excepthook = self._handle_uncaught_exception
+        signal.signal(signal.SIGINT, self._handle_sigint)
+
         # 进程监控信号
         self._monitor.process_started.connect(self._on_process_started)
         self._monitor.process_stopped.connect(self._on_process_stopped)
@@ -76,7 +90,7 @@ class Application:
         self._timer.minute_tick.connect(self._on_minute_tick)
 
         # 收费弹窗
-        self._overlay.confirm_button.clicked.connect(self._on_payment_confirmed)
+        self._overlay.payment_completed.connect(self._on_payment_confirmed)
 
         # 托盘菜单
         self._tray.show_action.triggered.connect(self._on_show_status)
@@ -84,8 +98,75 @@ class Application:
         self._tray.manual_trigger_action.triggered.connect(self._on_manual_trigger)
         self._tray.quit_action.triggered.connect(self._on_quit)
 
+    def _recover_locked_target_windows(self, reason: str):
+        """兜底恢复像素蛋糕窗口交互状态，避免上次异常退出后残留禁用状态。"""
+        restored = recover_process_windows(
+            self._config.process_name,
+            hwnds=getattr(self._overlay, "_locked_hwnds", []),
+        )
+        if restored:
+            logger.info("%s已恢复目标窗口交互状态: %s", reason, restored)
+
+    def _build_runtime_snapshot(self) -> dict:
+        """汇总关键运行态，便于异常日志和现场排查。"""
+        return {
+            "is_exporting": self._is_exporting,
+            "payment_confirmed": self._payment_confirmed,
+            "overlay_visible": self._overlay.isVisible(),
+            "timer_running": self._timer.is_running,
+            "elapsed_seconds": self._timer.get_elapsed_seconds(),
+            "monitor": self._monitor.get_runtime_snapshot(),
+        }
+
+    def _log_runtime_snapshot(self, reason: str, level: int = logging.INFO):
+        logger.log(level, "%s运行快照: %s", reason, self._build_runtime_snapshot())
+
+    def _handle_uncaught_exception(self, exc_type, exc_value, exc_tb):
+        """记录未捕获异常，并在退出前尽量恢复现场。"""
+        if issubclass(exc_type, KeyboardInterrupt):
+            logger.info("收到 KeyboardInterrupt，准备退出应用")
+            self._handle_sigint(signal.SIGINT, None)
+            return
+
+        logger.critical("程序发生未捕获异常: %s", exc_value)
+        logger.critical("异常堆栈:\n%s", "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        self._log_runtime_snapshot("异常前", level=logging.CRITICAL)
+        try:
+            self._cleanup_before_exit()
+        except Exception as cleanup_error:
+            logger.critical("异常清理失败: %s", cleanup_error)
+
+        if self._original_excepthook:
+            self._original_excepthook(exc_type, exc_value, exc_tb)
+
+    def _cleanup_before_exit(self):
+        """退出前统一清理锁定状态，保证像素蛋糕窗口一定恢复可操作。"""
+        if self._cleanup_done:
+            return
+
+        self._cleanup_done = True
+        self._signal_pump_timer.stop()
+        sys.excepthook = self._original_excepthook
+        signal.signal(signal.SIGINT, self._original_sigint_handler)
+        self._log_runtime_snapshot("退出前")
+        self._monitor.set_export_state_hold(False)
+        self._monitor.set_post_payment_pending(False)
+        self._monitor.resume_target_processes()
+        self._overlay.close_payment()
+        self._recover_locked_target_windows("退出前兜底解锁，")
+
+    def _handle_sigint(self, signum, frame):
+        """处理 Ctrl+C，确保 Qt 事件循环可以优雅退出。"""
+        if self._quit_requested:
+            return
+
+        self._quit_requested = True
+        logger.info("收到 Ctrl+C，正在退出应用...")
+        QTimer.singleShot(0, self._on_quit)
+
     def _on_process_started(self):
         """目标程序启动"""
+        self._monitor.set_post_payment_pending(False)
         if self._is_exporting:
             logger.info("目标程序已启动，但当前仍处于导出结算流程，暂不开始新计时")
             self._tray.set_running_state(False)
@@ -102,6 +183,9 @@ class Application:
     def _on_process_stopped(self):
         """目标程序退出"""
         logger.info("目标程序已退出，暂停计时")
+        self._monitor.set_export_state_hold(False)
+        self._monitor.set_post_payment_pending(False)
+        self._monitor.resume_target_processes()
         # 如果正在显示收费弹窗，先关闭
         if self._overlay.isVisible():
             self._overlay.close_payment()
@@ -121,7 +205,9 @@ class Application:
 
         self._is_exporting = True
         self._payment_confirmed = False
+        self._monitor.set_post_payment_pending(False)
         logger.info("检测到导出行为，停止计时并显示收费弹窗")
+        self._log_runtime_snapshot("导出触发前")
 
         # 停止计时
         self._timer.pause()
@@ -132,6 +218,8 @@ class Application:
         rate = self._config.rate
 
         # 显示收费弹窗
+        self._monitor.set_export_state_hold(True)
+        self._monitor.suspend_target_processes()
         self._overlay.show_payment(
             minutes,
             rate,
@@ -146,10 +234,14 @@ class Application:
 
         if self._payment_confirmed:
             logger.info("导出已结束，进入下一次计时周期")
+            self._monitor.set_export_state_hold(False)
             self._finish_export_cycle()
             return
 
         logger.info("导出在付款前被取消，关闭收费弹窗并恢复计时")
+        self._monitor.set_export_state_hold(False)
+        self._monitor.set_post_payment_pending(False)
+        self._monitor.resume_target_processes()
         if self._overlay.isVisible():
             self._overlay.close_payment()
         self._is_exporting = False
@@ -173,8 +265,25 @@ class Application:
 
     def _on_payment_confirmed(self):
         """管理员确认收款"""
+        admin_confirmed = False
+        pwd_dialog = PasswordDialog(self._config, self._overlay)
+        self._overlay.pause_keep_on_top()
+        try:
+            if pwd_dialog.exec_() != PasswordDialog.Accepted or not pwd_dialog.authenticated:
+                logger.info("确认收款已取消或密码验证失败，收费框保持显示")
+                self._overlay.reset_payment_confirmation()
+                return
+            admin_confirmed = True
+        finally:
+            if self._overlay.isVisible() and not admin_confirmed:
+                self._overlay.resume_keep_on_top()
+
         logger.info("确认收款，关闭弹窗并等待本次导出结束")
+        self._log_runtime_snapshot("确认收款前")
         self._overlay.close_payment()
+        self._monitor.set_post_payment_pending(True)
+        self._monitor.set_export_state_hold(False)
+        self._monitor.resume_target_processes()
         self._timer.reset()
         self._tray.reset()
         self._is_exporting = True
@@ -244,6 +353,9 @@ class Application:
         rate = self._config.rate
         self._is_exporting = True
         self._payment_confirmed = False
+        self._monitor.set_export_state_hold(True)
+        self._monitor.set_post_payment_pending(False)
+        self._monitor.suspend_target_processes()
         self._overlay.show_payment(
             minutes,
             rate,
@@ -255,6 +367,7 @@ class Application:
         """当前收费流程结束，准备进入下一轮计时。"""
         self._is_exporting = False
         self._payment_confirmed = False
+        self._monitor.set_post_payment_pending(False)
         if self._monitor.is_process_running:
             self._timer.start()
             self._tray.set_running_state(True)
@@ -262,19 +375,25 @@ class Application:
 
     def _on_quit(self):
         """退出应用"""
+        if self._cleanup_done:
+            QApplication.quit()
+            return
+        self._cleanup_before_exit()
         self._monitor.stop()
         self._timer.pause()
-        self._overlay.close_payment()
         QApplication.quit()
         logger.info("应用已退出")
 
     def run(self) -> int:
         """启动应用"""
+        self._recover_locked_target_windows("启动时自恢复，")
+
         # 显示托盘图标
         self._tray.show()
 
         # 启动监控线程
         self._monitor.start()
+        self._signal_pump_timer.start()
 
         logger.info("应用已启动，正在监控目标程序...")
 

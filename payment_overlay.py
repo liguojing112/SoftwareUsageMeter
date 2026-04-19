@@ -8,6 +8,8 @@
 5. 弹窗期间锁定像素蛋糕窗口
 """
 
+import atexit
+import logging
 import os
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -23,6 +25,28 @@ try:
     HAS_WIN32 = True
 except ImportError:
     HAS_WIN32 = False
+
+
+_LOCKED_HWND_REGISTRY = set()
+
+
+def _unlock_registered_windows():
+    """Python 姝ｅ父閫€鍑烘椂鍏ㄩ噺鎭㈠鎵€鏈夊凡琚攣瀹氱殑绐楀彛銆?"""
+    if not HAS_WIN32:
+        return
+
+    for hwnd in list(_LOCKED_HWND_REGISTRY):
+        try:
+            win32gui.EnableWindow(hwnd, True)
+        except Exception:
+            continue
+        finally:
+            _LOCKED_HWND_REGISTRY.discard(hwnd)
+
+
+atexit.register(_unlock_registered_windows)
+
+logger = logging.getLogger(__name__)
 
 
 class _InlineConfig:
@@ -41,6 +65,7 @@ class PaymentOverlay(QWidget):
         super().__init__(parent)
         self._config = config or _InlineConfig(qr_code_path)
         self._locked_hwnds = []
+        self._payment_completion_emitted = False
         self._keep_top_timer = QTimer(self)
         self._keep_top_timer.setInterval(500)
         self._keep_top_timer.timeout.connect(self._keep_on_top)
@@ -48,7 +73,7 @@ class PaymentOverlay(QWidget):
         self._init_ui()
         self.update_display(0, float(getattr(self._config, "rate", 1.0)))
         self._load_qr_code()
-        self._confirm_btn.clicked.connect(self.payment_completed.emit)
+        self._confirm_btn.pressed.connect(self._emit_payment_completed)
 
     def _init_ui(self):
         """初始化界面"""
@@ -59,7 +84,11 @@ class PaymentOverlay(QWidget):
             Qt.WindowStaysOnTopHint |  # 置顶
             Qt.Tool  # 不在任务栏显示
         )
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.setStyleSheet("background-color: rgba(0, 0, 0, 230); color: white;")
 
         # 主布局
@@ -140,7 +169,7 @@ class PaymentOverlay(QWidget):
 
         self._confirm_btn = QPushButton("已付款 · 确认收款")
         self._confirm_btn.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
-        self._confirm_btn.setFixedSize(400, 80)
+        self._confirm_btn.setFixedSize(700, 110)
         self._confirm_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -177,14 +206,10 @@ class PaymentOverlay(QWidget):
         """
         # 更新显示
         self.update_display(minutes, rate)
+        self._payment_completion_emitted = False
 
-        # 锁定目标窗口
-        handles_to_lock = []
-        if lock_targets:
-            handles_to_lock.extend(lock_targets)
-        elif hwnd:
-            handles_to_lock.append(hwnd)
-        self._lock_windows(handles_to_lock)
+        # 通过全屏置顶遮罩层阻断操作，避免直接禁用外部窗口导致异常退出后残留不可点击状态
+        self._locked_hwnds = []
 
         # 加载收款码
         self._load_qr_code()
@@ -193,6 +218,7 @@ class PaymentOverlay(QWidget):
         self.show()
         self.raise_()
         self.activateWindow()
+        self._confirm_btn.setFocus()
 
         # 启动置顶保持定时器
         self._keep_top_timer.start()
@@ -216,8 +242,21 @@ class PaymentOverlay(QWidget):
             try:
                 win32gui.EnableWindow(hwnd, False)
                 self._locked_hwnds.append(hwnd)
+                _LOCKED_HWND_REGISTRY.add(hwnd)
             except Exception:
                 continue
+
+    def _unlock_windows(self, handles: list[int] | None = None):
+        if not HAS_WIN32:
+            return
+
+        for hwnd in list(handles or []):
+            try:
+                win32gui.EnableWindow(hwnd, True)
+            except Exception:
+                continue
+            finally:
+                _LOCKED_HWND_REGISTRY.discard(hwnd)
 
     def _load_qr_code(self):
         """加载收款码图片"""
@@ -252,7 +291,25 @@ class PaymentOverlay(QWidget):
         """保持窗口置顶（防止被其他窗口抢占焦点）"""
         if self.isVisible():
             self.raise_()
-            self.activateWindow()
+
+    def pause_keep_on_top(self):
+        """临时暂停置顶保持，避免管理员确认对话框被遮挡。"""
+        self._keep_top_timer.stop()
+
+    def resume_keep_on_top(self):
+        """恢复置顶保持。"""
+        if self.isVisible():
+            self._keep_top_timer.start()
+            self.raise_()
+
+    def _emit_payment_completed(self):
+        """尽早发出确认收款信号，避免鼠标释放阶段被其他窗口抢焦点后丢失点击。"""
+        if self._payment_completion_emitted:
+            return
+
+        self._payment_completion_emitted = True
+        logger.info("收费框确认按钮已触发")
+        self.payment_completed.emit()
 
     def showEvent(self, event):
         """确保通过任意方式显示时都铺满主屏幕。"""
@@ -264,22 +321,43 @@ class PaymentOverlay(QWidget):
     def close_payment(self):
         """关闭收费弹窗并解锁目标窗口"""
         self._keep_top_timer.stop()
+        self._payment_completion_emitted = False
 
         # 解锁目标窗口
-        if HAS_WIN32:
-            for hwnd in self._locked_hwnds:
-                try:
-                    win32gui.EnableWindow(hwnd, True)
-                except Exception:
-                    continue
+        self._unlock_windows(self._locked_hwnds)
         self._locked_hwnds = []
 
         self.hide()
 
+    def reset_payment_confirmation(self):
+        """管理员未确认时，允许再次点击确认收款按钮。"""
+        self._payment_completion_emitted = False
+        if self.isVisible():
+            self._confirm_btn.setFocus()
+
     def keyPressEvent(self, event):
         """禁用 ESC 等快捷键关闭弹窗"""
         # 不允许通过键盘关闭弹窗，只有点击"确认收款"才能关闭
-        pass
+        event.accept()
+
+    def mousePressEvent(self, event):
+        """吞掉背景区域鼠标点击，防止透传到底层导出界面。"""
+        if self.childAt(event.pos()) is self._confirm_btn:
+            super().mousePressEvent(event)
+            return
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if self.childAt(event.pos()) is self._confirm_btn:
+            super().mouseReleaseEvent(event)
+            return
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if self.childAt(event.pos()) is self._confirm_btn:
+            super().mouseDoubleClickEvent(event)
+            return
+        event.accept()
 
     def closeEvent(self, event):
         """禁止通过关闭按钮关闭"""

@@ -201,6 +201,35 @@ class TestPaymentOverlay(unittest.TestCase):
 
         print("✓ 全屏显示测试通过")
 
+    def test_close_payment_unlocks_registered_windows(self):
+        """关闭收费框时应同步解锁窗口并清理全局注册。"""
+        import payment_overlay
+
+        with patch.object(payment_overlay, "HAS_WIN32", True), \
+             patch.object(payment_overlay, "win32gui") as mock_win32gui:
+            payment_overlay._LOCKED_HWND_REGISTRY.clear()
+            self.overlay._locked_hwnds = [101, 202]
+            payment_overlay._LOCKED_HWND_REGISTRY.update(self.overlay._locked_hwnds)
+
+            self.overlay.close_payment()
+
+            mock_win32gui.EnableWindow.assert_any_call(101, True)
+            mock_win32gui.EnableWindow.assert_any_call(202, True)
+            self.assertEqual(payment_overlay._LOCKED_HWND_REGISTRY, set())
+            self.assertEqual(self.overlay._locked_hwnds, [])
+
+    def test_show_payment_does_not_disable_external_windows(self):
+        """收费框应通过全屏遮罩拦截，而不是直接禁用像素蛋糕窗口。"""
+        import payment_overlay
+
+        with patch.object(payment_overlay, "HAS_WIN32", True), \
+             patch.object(payment_overlay, "win32gui") as mock_win32gui:
+            self.overlay.show_payment(3, 2.0, lock_targets=[101])
+
+            self.assertEqual(self.overlay._locked_hwnds, [])
+            mock_win32gui.EnableWindow.assert_not_called()
+            self.overlay.close_payment()
+
 
 def run_payment_tests():
     """运行收费弹窗测试"""

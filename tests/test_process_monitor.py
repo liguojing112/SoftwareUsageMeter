@@ -8,6 +8,8 @@ import sys
 import time
 import subprocess
 import unittest
+from unittest import mock
+from PIL import Image, ImageDraw
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,6 +37,7 @@ class TestProcessMonitor(unittest.TestCase):
             check_export_dialog,
             disable_window,
             enable_window,
+            recover_process_windows,
         )
 
         self.is_process_running = is_process_running
@@ -44,6 +47,7 @@ class TestProcessMonitor(unittest.TestCase):
         self.check_export_dialog = check_export_dialog
         self.disable_window = disable_window
         self.enable_window = enable_window
+        self.recover_process_windows = recover_process_windows
 
         # 测试进程
         self.test_process_name = "notepad.exe"
@@ -207,6 +211,87 @@ class TestProcessMonitor(unittest.TestCase):
 
         print("✓ 无效窗口句柄测试通过")
 
+    def test_recover_process_windows_uses_known_handles(self):
+        """即使进程查找不到，也应解锁显式传入的窗口句柄。"""
+        with mock.patch("process_monitor.find_pid_by_name", return_value=None), \
+             mock.patch("process_monitor.enable_window", side_effect=lambda hwnd: hwnd != 0) as mock_enable:
+            restored = self.recover_process_windows("pixcake.exe", hwnds=[101, 0, 202, 101])
+
+        self.assertEqual(restored, [101, 202])
+        self.assertEqual(mock_enable.call_count, 2)
+
+    def test_get_new_export_worker_pids_ignores_existing_workers(self):
+        """启动前已存在的 export worker 不应被当成新导出。"""
+        from process_monitor import get_new_export_worker_pids
+
+        self.assertEqual(get_new_export_worker_pids({39552}, {39552}), set())
+        self.assertEqual(get_new_export_worker_pids({39552, 42000}, {39552}), {42000})
+
+    def test_startup_guard_window(self):
+        """启动保护时间窗内应返回 True，超时后应返回 False。"""
+        from process_monitor import is_within_guard_window
+
+        self.assertTrue(is_within_guard_window(12.0, 10.0, 3.0))
+        self.assertFalse(is_within_guard_window(14.5, 10.0, 3.0))
+        self.assertFalse(is_within_guard_window(12.0, None, 3.0))
+
+    def test_debounce_helper(self):
+        """防抖辅助函数应正确判断持续时间是否达标。"""
+        from process_monitor import is_debounce_satisfied
+
+        self.assertFalse(is_debounce_satisfied(None, 10.0, 0.8))
+        self.assertFalse(is_debounce_satisfied(10.0, 10.5, 0.8))
+        self.assertTrue(is_debounce_satisfied(10.0, 10.8, 0.8))
+
+    def test_strong_export_signal_helper(self):
+        """新导出 worker 或标题命中窗口都应视为强信号。"""
+        from process_monitor import is_strong_export_signal
+
+        self.assertTrue(is_strong_export_signal(None, 39340))
+        self.assertTrue(is_strong_export_signal(12345, None))
+        self.assertTrue(is_strong_export_signal(None, None, True))
+        self.assertFalse(is_strong_export_signal(None, None))
+
+    def test_window_matches_keywords_only_uses_title(self):
+        """Qt SaveBits 这类类名命中不应再被误判为导出窗口。"""
+        from process_monitor import window_matches_keywords
+
+        with mock.patch("process_monitor.get_window_title", return_value=""), \
+             mock.patch("process_monitor.get_window_class", return_value="Qt5152QWindowToolTipSaveBits"):
+            self.assertFalse(window_matches_keywords(12345, ["save"]))
+
+    def test_check_export_dialog_ignores_non_family_keyword_window(self):
+        """文件资源管理器等非目标进程家族窗口即使标题带导出，也不应被当成导出框。"""
+        with mock.patch("process_monitor.HAS_WIN32", True), \
+             mock.patch("process_monitor.get_process_family_pids", return_value={100}), \
+             mock.patch("process_monitor.find_windows_by_pids", return_value=[]), \
+             mock.patch("process_monitor.enumerate_visible_windows", return_value=[200]), \
+             mock.patch("process_monitor.get_window_owner_hwnd", return_value=None), \
+             mock.patch("process_monitor.get_window_pid", side_effect=lambda hwnd: {200: 31376}.get(hwnd)), \
+             mock.patch("process_monitor.window_matches_keywords", return_value=True), \
+             mock.patch("process_monitor.win32gui.GetForegroundWindow", return_value=0):
+            export_hwnd = self.check_export_dialog(100, ["导出"])
+
+        self.assertIsNone(export_hwnd)
+
+    def test_suspend_and_resume_process_helpers(self):
+        """挂起/恢复进程辅助函数应返回成功处理的 PID。"""
+        from process_monitor import suspend_processes, resume_processes
+
+        class FakeProcess:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def suspend(self):
+                return None
+
+            def resume(self):
+                return None
+
+        with mock.patch("process_monitor.psutil.Process", side_effect=lambda pid: FakeProcess(pid)):
+            self.assertEqual(suspend_processes({3, 1, 2}), [3, 2, 1])
+            self.assertEqual(resume_processes({3, 1, 2}), [1, 2, 3])
+
 
 class TestProcessMonitorThread(unittest.TestCase):
     """测试进程监控线程"""
@@ -236,6 +321,31 @@ class TestProcessMonitorThread(unittest.TestCase):
         self.assertFalse(monitor.is_process_running)
 
         print("✓ 监控线程创建测试通过")
+
+    def test_post_payment_clear_debounce_switch(self):
+        """付款确认后应切换到更长的导出结束判定窗口。"""
+        from process_monitor import (
+            EXPORT_CLEAR_DEBOUNCE_SECONDS,
+            POST_PAYMENT_EXPORT_CLEAR_DEBOUNCE_SECONDS,
+            ProcessMonitor,
+        )
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+
+        self.assertEqual(monitor._get_export_clear_debounce_seconds(), EXPORT_CLEAR_DEBOUNCE_SECONDS)
+
+        monitor._export_clear_candidate_since = 1.0
+        monitor.set_post_payment_pending(True)
+        self.assertTrue(monitor.get_runtime_snapshot()["post_payment_pending"])
+        self.assertIsNone(monitor._export_clear_candidate_since)
+        self.assertEqual(
+            monitor._get_export_clear_debounce_seconds(),
+            POST_PAYMENT_EXPORT_CLEAR_DEBOUNCE_SECONDS,
+        )
+
+        monitor.set_post_payment_pending(False)
+        self.assertEqual(monitor._get_export_clear_debounce_seconds(), EXPORT_CLEAR_DEBOUNCE_SECONDS)
 
     def test_monitor_signals(self):
         """测试监控线程信号"""
@@ -276,6 +386,28 @@ class TestProcessMonitorThread(unittest.TestCase):
     def _count_signal(self, signal_name):
         """计数信号"""
         self.signals_received[signal_name] += 1
+
+
+class TestProcessMonitorVisualDetection(unittest.TestCase):
+    """测试基于截图的导出页视觉识别。"""
+
+    def test_export_visual_positive(self):
+        from process_monitor import image_matches_export_visual_state
+
+        image = Image.new("RGB", (960, 800), (45, 47, 52))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((752, 712, 911, 775), fill=(244, 206, 74))
+
+        self.assertTrue(image_matches_export_visual_state(image))
+
+    def test_export_visual_negative(self):
+        from process_monitor import image_matches_export_visual_state
+
+        image = Image.new("RGB", (960, 800), (45, 47, 52))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((80, 80, 160, 120), fill=(244, 206, 74))
+
+        self.assertFalse(image_matches_export_visual_state(image))
 
 
 def run_process_monitor_tests():
