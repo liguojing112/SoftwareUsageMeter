@@ -6,6 +6,7 @@
 import os
 import sys
 import time
+import json
 import tempfile
 import shutil
 import unittest
@@ -109,6 +110,8 @@ class TestIntegration(unittest.TestCase):
         self.overlay_shown = False
         self.overlay_closed = False
         self.timer_reset = False
+        self.is_exporting = False
+        self.payment_confirmed = False
 
         print(f"测试目录: {self.test_dir}")
 
@@ -151,6 +154,8 @@ class TestIntegration(unittest.TestCase):
 
     def _on_process_started(self):
         """模拟进程启动处理"""
+        if self.is_exporting:
+            return
         self.timer_started = True
         self.timer.start()
         print("  计时器启动")
@@ -158,11 +163,21 @@ class TestIntegration(unittest.TestCase):
     def _on_process_stopped(self):
         """模拟进程退出处理"""
         self.timer_stopped = True
+        if self.overlay.isVisible():
+            self.overlay.close_payment()
         self.timer.pause()
+        self.is_exporting = False
+        self.payment_confirmed = False
         print("  计时器暂停")
 
     def _on_export_detected(self):
         """模拟导出检测处理"""
+        if self.is_exporting:
+            return
+
+        self.is_exporting = True
+        self.payment_confirmed = False
+
         # 停止计时
         self.timer.pause()
 
@@ -178,6 +193,21 @@ class TestIntegration(unittest.TestCase):
 
     def _on_export_cancelled(self):
         """模拟导出取消处理"""
+        if not self.is_exporting:
+            return
+
+        if self.payment_confirmed:
+            self.is_exporting = False
+            self.payment_confirmed = False
+            self.timer.start()
+            print("  导出结束，开始下一轮计时")
+            return
+
+        if self.overlay.isVisible():
+            self.overlay.close_payment()
+        self.is_exporting = False
+        self.payment_confirmed = False
+        self.timer.start()
         print("  导出取消")
 
     def _on_payment_confirmed(self):
@@ -186,6 +216,12 @@ class TestIntegration(unittest.TestCase):
         self.overlay_closed = True
         self.timer.reset()
         self.timer_reset = True
+        self.payment_confirmed = True
+
+        if not self.monitor._exporting:
+            self.is_exporting = False
+            self.payment_confirmed = False
+            self.timer.start()
         print("  确认收款，计时器重置")
 
     def test_complete_payment_flow(self):
@@ -283,11 +319,11 @@ class TestIntegration(unittest.TestCase):
         QApplication.processEvents()
         time.sleep(0.5)
 
-        # 弹窗应保持显示（只有确认收款才关闭）
-        self.assertTrue(self.overlay.isVisible())
+        # 取消导出后应恢复编辑流程
+        self.assertFalse(self.overlay.isVisible())
 
-        # 计时器应保持暂停状态
-        self.assertFalse(self.timer.is_running)
+        # 计时器应恢复
+        self.assertTrue(self.timer.is_running)
 
         print("✓ 导出取消流程测试通过")
 
@@ -340,8 +376,10 @@ class TestIntegration(unittest.TestCase):
         original_on_export = self._on_export_detected
 
         def counting_on_export():
-            self.overlay_shown_count += 1
+            was_visible = self.overlay.isVisible()
             original_on_export()
+            if self.overlay.isVisible() and not was_visible:
+                self.overlay_shown_count += 1
 
         self._on_export_detected = counting_on_export
 

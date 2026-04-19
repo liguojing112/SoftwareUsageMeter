@@ -10,7 +10,7 @@
 
 import os
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -25,18 +25,30 @@ except ImportError:
     HAS_WIN32 = False
 
 
+class _InlineConfig:
+    """兼容独立调试/测试时直接传入收款码路径。"""
+
+    def __init__(self, qr_code_path: str = ""):
+        self.qr_code_path = qr_code_path
+
+
 class PaymentOverlay(QWidget):
     """全屏置顶收费弹窗"""
 
-    def __init__(self, config, parent=None):
+    payment_completed = pyqtSignal()
+
+    def __init__(self, config=None, parent=None, qr_code_path: str = ""):
         super().__init__(parent)
-        self._config = config
-        self._locked_hwnd = None
+        self._config = config or _InlineConfig(qr_code_path)
+        self._locked_hwnds = []
         self._keep_top_timer = QTimer(self)
         self._keep_top_timer.setInterval(500)
         self._keep_top_timer.timeout.connect(self._keep_on_top)
 
         self._init_ui()
+        self.update_display(0, float(getattr(self._config, "rate", 1.0)))
+        self._load_qr_code()
+        self._confirm_btn.clicked.connect(self.payment_completed.emit)
 
     def _init_ui(self):
         """初始化界面"""
@@ -47,13 +59,14 @@ class PaymentOverlay(QWidget):
             Qt.WindowStaysOnTopHint |  # 置顶
             Qt.Tool  # 不在任务栏显示
         )
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setStyleSheet("background-color: rgba(0, 0, 0, 230);")
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 230); color: white;")
 
         # 主布局
         layout = QVBoxLayout(self)
         layout.setSpacing(30)
         layout.setContentsMargins(80, 60, 80, 60)
+        self._content_layout = layout
 
         # 标题
         title_label = QLabel("使 用 计 费")
@@ -154,42 +167,57 @@ class PaymentOverlay(QWidget):
         footer.setAlignment(Qt.AlignCenter)
         layout.addWidget(footer)
 
-    def show_payment(self, minutes: int, rate: float, hwnd=None):
+    def show_payment(self, minutes: int, rate: float, hwnd=None, lock_targets=None):
         """
         显示收费弹窗
         :param minutes: 使用分钟数
         :param rate: 计时单价
         :param hwnd: 要锁定的窗口句柄
+        :param lock_targets: 需要统一锁定的窗口句柄列表
         """
-        # 锁定目标窗口
-        if hwnd and HAS_WIN32:
-            self._locked_hwnd = hwnd
-            try:
-                win32gui.EnableWindow(hwnd, False)
-            except Exception:
-                pass
-
         # 更新显示
-        self._time_label.setText(f"使用时长：{minutes} 分钟")
-        self._rate_label.setText(f"计时单价：{rate:.2f} 元/分钟")
+        self.update_display(minutes, rate)
 
-        total = minutes * rate
-        self._amount_label.setText(f"合计金额：¥ {total:.2f}")
+        # 锁定目标窗口
+        handles_to_lock = []
+        if lock_targets:
+            handles_to_lock.extend(lock_targets)
+        elif hwnd:
+            handles_to_lock.append(hwnd)
+        self._lock_windows(handles_to_lock)
 
         # 加载收款码
         self._load_qr_code()
 
         # 全屏显示
-        screen = QApplication.primaryScreen()
-        if screen:
-            self.setGeometry(screen.geometry())
-
         self.show()
         self.raise_()
         self.activateWindow()
 
         # 启动置顶保持定时器
         self._keep_top_timer.start()
+
+    def update_display(self, duration_minutes: int, rate: float):
+        """单独更新弹窗金额信息，便于调试和测试。"""
+        self._time_label.setText(f"使用时长：{duration_minutes} 分钟")
+        self._rate_label.setText(f"计时单价：{rate:.2f} 元/分钟")
+        total = duration_minutes * rate
+        self._amount_label.setText(f"合计金额：¥ {total:.2f}")
+
+    def _lock_windows(self, handles: list[int]):
+        """锁定像素蛋糕相关窗口，防止收费前继续操作。"""
+        self._locked_hwnds = []
+        if not HAS_WIN32:
+            return
+
+        for hwnd in handles:
+            if not hwnd or hwnd in self._locked_hwnds:
+                continue
+            try:
+                win32gui.EnableWindow(hwnd, False)
+                self._locked_hwnds.append(hwnd)
+            except Exception:
+                continue
 
     def _load_qr_code(self):
         """加载收款码图片"""
@@ -226,17 +254,25 @@ class PaymentOverlay(QWidget):
             self.raise_()
             self.activateWindow()
 
+    def showEvent(self, event):
+        """确保通过任意方式显示时都铺满主屏幕。"""
+        screen = QApplication.primaryScreen()
+        if screen:
+            self.setGeometry(screen.availableGeometry())
+        super().showEvent(event)
+
     def close_payment(self):
         """关闭收费弹窗并解锁目标窗口"""
         self._keep_top_timer.stop()
 
         # 解锁目标窗口
-        if self._locked_hwnd and HAS_WIN32:
-            try:
-                win32gui.EnableWindow(self._locked_hwnd, True)
-            except Exception:
-                pass
-            self._locked_hwnd = None
+        if HAS_WIN32:
+            for hwnd in self._locked_hwnds:
+                try:
+                    win32gui.EnableWindow(hwnd, True)
+                except Exception:
+                    continue
+        self._locked_hwnds = []
 
         self.hide()
 
@@ -253,3 +289,27 @@ class PaymentOverlay(QWidget):
     def confirm_button(self) -> QPushButton:
         """获取确认收款按钮的引用"""
         return self._confirm_btn
+
+    @property
+    def duration_label(self) -> QLabel:
+        return self._time_label
+
+    @property
+    def rate_label(self) -> QLabel:
+        return self._rate_label
+
+    @property
+    def amount_label(self) -> QLabel:
+        return self._amount_label
+
+    @property
+    def pay_button(self) -> QPushButton:
+        return self._confirm_btn
+
+    @property
+    def qr_label(self) -> QLabel:
+        return self._qr_label
+
+    @property
+    def central_layout(self) -> QVBoxLayout:
+        return self._content_layout

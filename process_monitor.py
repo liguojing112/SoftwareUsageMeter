@@ -6,7 +6,6 @@
 3. 获取目标程序的窗口句柄
 """
 
-import ctypes
 import logging
 
 import psutil
@@ -15,7 +14,6 @@ from PyQt5.QtCore import QThread, pyqtSignal
 try:
     import win32gui
     import win32process
-    import win32con
     HAS_WIN32 = True
 except ImportError:
     HAS_WIN32 = False
@@ -90,11 +88,12 @@ def check_export_dialog(pid: int, keywords: list[str]) -> int | None:
     """
     if not HAS_WIN32:
         return None
+    lowered_keywords = [kw.lower() for kw in keywords if kw]
     windows = find_windows_by_pid(pid)
     for hwnd in windows:
         try:
             title = win32gui.GetWindowText(hwnd)
-            if title and any(kw in title for kw in keywords):
+            if title and any(kw in title.lower() for kw in lowered_keywords):
                 return hwnd
         except Exception:
             continue
@@ -165,9 +164,15 @@ class ProcessMonitor(QThread):
                 self._main_hwnd = find_main_window(pid)
                 logger.info(f"检测到目标程序启动: PID={pid}")
                 self.process_started.emit()
+            elif is_running and self._current_pid != pid:
+                self._current_pid = pid
+                self._main_hwnd = find_main_window(pid)
+                logger.info(f"检测到目标程序实例变化，切换到 PID={pid}")
             elif not is_running and self._was_running:
                 self._current_pid = None
                 self._main_hwnd = None
+                self._export_hwnd = None
+                self._was_exporting = False
                 logger.info("目标程序已退出")
                 self.process_stopped.emit()
 
@@ -175,6 +180,7 @@ class ProcessMonitor(QThread):
 
             # 检测导出行为（仅当进程运行时）
             if is_running and self._current_pid:
+                self._main_hwnd = find_main_window(self._current_pid) or self._main_hwnd
                 export_hwnd = check_export_dialog(self._current_pid, keywords)
                 if export_hwnd and not self._was_exporting:
                     self._export_hwnd = export_hwnd
@@ -205,5 +211,30 @@ class ProcessMonitor(QThread):
         return self._main_hwnd
 
     @property
+    def export_hwnd(self) -> int | None:
+        return self._export_hwnd
+
+    @property
     def is_process_running(self) -> bool:
         return self._was_running
+
+    @property
+    def is_export_dialog_visible(self) -> bool:
+        return self._was_exporting
+
+    @property
+    def lock_target_hwnds(self) -> list[int]:
+        """返回当前应锁定的像素蛋糕窗口集合。"""
+        if not HAS_WIN32 or not self._current_pid:
+            return [hwnd for hwnd in [self._main_hwnd, self._export_hwnd] if hwnd]
+
+        handles = []
+        for hwnd in find_windows_by_pid(self._current_pid):
+            if hwnd and hwnd not in handles:
+                handles.append(hwnd)
+
+        for hwnd in [self._main_hwnd, self._export_hwnd]:
+            if hwnd and hwnd not in handles:
+                handles.append(hwnd)
+
+        return handles

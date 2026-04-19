@@ -12,7 +12,6 @@ import os
 import logging
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
-from PyQt5.QtCore import Qt
 
 from config_manager import ConfigManager
 from process_monitor import ProcessMonitor
@@ -54,6 +53,7 @@ class Application:
 
         # 状态
         self._is_exporting = False
+        self._payment_confirmed = False
 
         # 连接信号
         self._connect_signals()
@@ -86,6 +86,11 @@ class Application:
 
     def _on_process_started(self):
         """目标程序启动"""
+        if self._is_exporting:
+            logger.info("目标程序已启动，但当前仍处于导出结算流程，暂不开始新计时")
+            self._tray.set_running_state(False)
+            return
+
         logger.info("目标程序已启动，开始计时")
         self._timer.start()
         self._tray.set_running_state(True)
@@ -103,6 +108,7 @@ class Application:
         self._timer.pause()
         self._tray.set_running_state(False)
         self._is_exporting = False
+        self._payment_confirmed = False
         self._tray.show_notification(
             "计时暂停",
             f"{self._config.process_name} 已退出，计时暂停"
@@ -114,31 +120,44 @@ class Application:
             return  # 防止重复触发
 
         self._is_exporting = True
+        self._payment_confirmed = False
         logger.info("检测到导出行为，停止计时并显示收费弹窗")
 
         # 停止计时
         self._timer.pause()
+        self._tray.set_running_state(False)
 
         # 获取计费信息
         minutes = self._timer.get_elapsed_minutes()
         rate = self._config.rate
 
-        # 获取目标窗口句柄用于锁定
-        hwnd = self._monitor.main_hwnd
-
         # 显示收费弹窗
-        self._overlay.show_payment(minutes, rate, hwnd)
+        self._overlay.show_payment(
+            minutes,
+            rate,
+            hwnd=self._monitor.main_hwnd,
+            lock_targets=self._monitor.lock_target_hwnds,
+        )
 
     def _on_export_cancelled(self):
-        """导出窗口关闭（用户取消了导出）"""
+        """导出窗口关闭（取消导出或导出完成）"""
         if not self._is_exporting:
             return
-        # 如果收费弹窗没有显示（用户在收费前就取消了导出），恢复计时
-        if not self._overlay.isVisible() and self._timer.is_running is False:
-            logger.info("导出已取消，恢复计时")
-            self._is_exporting = False
-            if self._monitor.is_process_running:
-                self._timer.start()
+
+        if self._payment_confirmed:
+            logger.info("导出已结束，进入下一次计时周期")
+            self._finish_export_cycle()
+            return
+
+        logger.info("导出在付款前被取消，关闭收费弹窗并恢复计时")
+        if self._overlay.isVisible():
+            self._overlay.close_payment()
+        self._is_exporting = False
+        self._payment_confirmed = False
+        if self._monitor.is_process_running:
+            self._timer.start()
+            self._tray.set_running_state(True)
+            self._tray.show_notification("恢复计时", "导出已取消，继续当前计时")
 
     def _on_timer_tick(self, seconds: int):
         """每秒更新计时显示"""
@@ -154,17 +173,19 @@ class Application:
 
     def _on_payment_confirmed(self):
         """管理员确认收款"""
-        logger.info("确认收款，关闭弹窗，重置计时")
+        logger.info("确认收款，关闭弹窗并等待本次导出结束")
         self._overlay.close_payment()
         self._timer.reset()
-        self._is_exporting = False
         self._tray.reset()
+        self._is_exporting = True
+        self._payment_confirmed = True
 
-        # 如果目标程序仍在运行，重新开始计时
-        if self._monitor.is_process_running:
-            self._timer.start()
-            self._tray.set_running_state(True)
-            self._tray.show_notification("计时重置", "已确认收款，重新开始计时")
+        # 手动触发收费等场景下可能没有导出窗口，直接进入下一轮
+        if not self._monitor.is_export_dialog_visible:
+            self._finish_export_cycle()
+            return
+
+        self._tray.show_notification("已确认收款", "已解锁导出，导出完成后将开始下一轮计时")
 
     def _on_show_status(self):
         """显示状态窗口"""
@@ -218,11 +239,26 @@ class Application:
 
         # 停止计时并显示收费
         self._timer.pause()
+        self._tray.set_running_state(False)
         minutes = self._timer.get_elapsed_minutes()
         rate = self._config.rate
-        hwnd = self._monitor.main_hwnd
-        self._overlay.show_payment(minutes, rate, hwnd)
         self._is_exporting = True
+        self._payment_confirmed = False
+        self._overlay.show_payment(
+            minutes,
+            rate,
+            hwnd=self._monitor.main_hwnd,
+            lock_targets=self._monitor.lock_target_hwnds,
+        )
+
+    def _finish_export_cycle(self):
+        """当前收费流程结束，准备进入下一轮计时。"""
+        self._is_exporting = False
+        self._payment_confirmed = False
+        if self._monitor.is_process_running:
+            self._timer.start()
+            self._tray.set_running_state(True)
+            self._tray.show_notification("开始新一轮计时", "本次导出已结束，已进入下一轮计时")
 
     def _on_quit(self):
         """退出应用"""

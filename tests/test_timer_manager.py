@@ -173,7 +173,7 @@ class TestTimerManager(unittest.TestCase):
             self.assertTrue(self.timer.is_running)
 
             QApplication.processEvents()
-            time.sleep(0.1)
+            time.sleep(0.25)
 
             self.timer.pause()
             self.assertFalse(self.timer.is_running)

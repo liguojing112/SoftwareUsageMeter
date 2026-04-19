@@ -10,7 +10,7 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QBrush
 from PyQt5.QtWidgets import (
     QSystemTrayIcon, QMenu, QAction, QWidget,
-    QVBoxLayout, QLabel, QHBoxLayout, QApplication
+    QVBoxLayout, QLabel, QHBoxLayout, QApplication, QSizePolicy
 )
 
 
@@ -88,47 +88,108 @@ class StatusWidget(QWidget):
             Qt.WindowMinimizeButtonHint |
             Qt.WindowCloseButtonHint
         )
-        self.setFixedSize(320, 200)
+        # 门店场景需足够宽高，避免大字号「已用时」等被裁切
+        self.resize(1080, 780)
+        self.setMinimumSize(1020, 700)
         self.setWindowTitle("计时计费 - 状态")
         self._init_ui()
 
     def _init_ui(self):
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #f7fbff;
+            }
+            QLabel {
+                color: #1f2d3d;
+            }
+            QLabel#status_label {
+                padding: 6px 4px 10px 4px;
+            }
+            QLabel#time_label {
+                padding: 96px 36px 108px 36px;
+            }
+            QLabel#cost_label {
+                padding: 8px 4px 12px 4px;
+            }
+            QLabel#process_label {
+                padding: 6px 4px;
+            }
+            QLabel#hint_label {
+                padding: 10px 4px 16px 4px;
+            }
+        """)
+
         layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.setContentsMargins(20, 15, 20, 15)
+        layout.setSpacing(24)
+        layout.setContentsMargins(44, 36, 44, 36)
+
+        wide_policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        wide_policy.setHorizontalStretch(1)
 
         # 状态标签
         self._status_label = QLabel("⏸ 未检测到目标程序")
-        self._status_label.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        self._status_label.setObjectName("status_label")
+        self._status_label.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
         self._status_label.setStyleSheet("color: #666666;")
+        self._status_label.setSizePolicy(wide_policy)
+        self._status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self._status_label)
 
-        # 计时显示
+        layout.addSpacing(24)
+
+        # 计时显示（行高与左右留白按约三倍放大，避免大字号被裁成一条）
         self._time_label = QLabel("已用时：00:00:00")
-        self._time_label.setFont(QFont("Microsoft YaHei", 22, QFont.Bold))
+        self._time_label.setObjectName("time_label")
+        self._time_label.setFont(QFont("Microsoft YaHei", 40, QFont.Bold))
         self._time_label.setStyleSheet("color: #2c3e50;")
+        self._time_label.setWordWrap(False)
+        time_row_policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        time_row_policy.setHorizontalStretch(1)
+        self._time_label.setSizePolicy(time_row_policy)
+        self._time_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._time_label.setMinimumHeight(312)
         layout.addWidget(self._time_label)
+
+        layout.addSpacing(24)
 
         # 费用显示
         self._cost_label = QLabel("预计费用：¥ 0.00")
-        self._cost_label.setFont(QFont("Microsoft YaHei", 16))
+        self._cost_label.setObjectName("cost_label")
+        self._cost_label.setFont(QFont("Microsoft YaHei", 26))
         self._cost_label.setStyleSheet("color: #e74c3c;")
+        self._cost_label.setSizePolicy(wide_policy)
+        self._cost_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self._cost_label)
 
         # 进程名
         self._process_label = QLabel("")
-        self._process_label.setFont(QFont("Microsoft YaHei", 10))
+        self._process_label.setObjectName("process_label")
+        self._process_label.setFont(QFont("Microsoft YaHei", 16))
         self._process_label.setStyleSheet("color: #999999;")
+        self._process_label.setSizePolicy(wide_policy)
+        self._process_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self._process_label)
+
+        self._hint_label = QLabel("检测到导出窗口后会暂停计时，并弹出收费页面。")
+        self._hint_label.setObjectName("hint_label")
+        self._hint_label.setWordWrap(True)
+        self._hint_label.setFont(QFont("Microsoft YaHei", 15))
+        self._hint_label.setStyleSheet("color: #607d8b;")
+        self._hint_label.setSizePolicy(wide_policy)
+        self._hint_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        layout.addWidget(self._hint_label)
+
+        layout.addStretch()
 
     def set_running(self, is_running: bool):
         """设置运行状态"""
+        status_pad = "padding: 6px 4px 10px 4px;"
         if is_running:
             self._status_label.setText("▶ 正在计时")
-            self._status_label.setStyleSheet("color: #27ae60;")
+            self._status_label.setStyleSheet(f"color: #27ae60; {status_pad}")
         else:
             self._status_label.setText("⏸ 未检测到目标程序")
-            self._status_label.setStyleSheet("color: #666666;")
+            self._status_label.setStyleSheet(f"color: #666666; {status_pad}")
 
     def update_time(self, time_str: str):
         """更新计时显示"""
