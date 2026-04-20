@@ -106,6 +106,7 @@ class TestAdminPanel(unittest.TestCase):
 
         # 模拟界面输入
         self.panel.rate_input.setText("2.5")
+        self.panel.export_rate_input.setText("3.5")
         self.panel.process_input.setText("TestApp.exe")
         self.panel.keywords_input.setText("保存,Save,导出")
 
@@ -115,6 +116,7 @@ class TestAdminPanel(unittest.TestCase):
 
         # 验证配置已更新
         self.assertEqual(self.config.rate, 2.5)
+        self.assertEqual(self.config.export_rate, 3.5)
         self.assertEqual(self.config.process_name, "TestApp.exe")
         self.assertIn("保存", self.config.export_window_keywords)
         self.assertIn("Save", self.config.export_window_keywords)
@@ -140,8 +142,16 @@ class TestAdminPanel(unittest.TestCase):
         # 应显示错误提示
         self.assertIn("请输入有效的数字", self.panel.status_label.text())
 
+        # 测试无效导出单价
+        self.panel.rate_input.setText("1.0")
+        self.panel.export_rate_input.setText("-2")
+        QTest.mouseClick(self.panel.save_button, Qt.LeftButton)
+        QApplication.processEvents()
+        self.assertIn("单张导出单价不能小于0", self.panel.status_label.text())
+
         # 测试空进程名
         self.panel.rate_input.setText("1.0")  # 恢复有效费率
+        self.panel.export_rate_input.setText("0")
         self.panel.process_input.setText("")
         QTest.mouseClick(self.panel.save_button, Qt.LeftButton)
         QApplication.processEvents()
@@ -155,6 +165,7 @@ class TestAdminPanel(unittest.TestCase):
         """测试UI组件"""
         # 检查所有组件都存在
         self.assertIsNotNone(self.panel.rate_input)
+        self.assertIsNotNone(self.panel.export_rate_input)
         self.assertIsNotNone(self.panel.process_input)
         self.assertIsNotNone(self.panel.keywords_input)
         self.assertIsNotNone(self.panel.qr_path_input)
@@ -164,6 +175,7 @@ class TestAdminPanel(unittest.TestCase):
 
         # 检查初始值显示
         self.assertEqual(self.panel.rate_input.text(), "1.0")
+        self.assertEqual(self.panel.export_rate_input.text(), "0.0")
         self.assertEqual(self.panel.process_input.text(), "PixCake.exe")
         self.assertEqual(self.panel.keywords_input.text(), "导出,Export")
 
@@ -217,6 +229,7 @@ class TestAdminPanel(unittest.TestCase):
         """测试保存成功反馈"""
         # 输入有效配置
         self.panel.rate_input.setText("3.0")
+        self.panel.export_rate_input.setText("2.0")
         self.panel.process_input.setText("MyApp.exe")
 
         # 点击保存
@@ -236,6 +249,7 @@ class TestAdminPanel(unittest.TestCase):
         """测试配置持久化"""
         # 修改配置
         self.panel.rate_input.setText("4.5")
+        self.panel.export_rate_input.setText("6.0")
         self.panel.process_input.setText("PersistentApp.exe")
 
         # 保存配置
@@ -254,6 +268,7 @@ class TestAdminPanel(unittest.TestCase):
 
         # 验证配置已持久化
         self.assertEqual(config2.rate, 4.5)
+        self.assertEqual(config2.export_rate, 6.0)
         self.assertEqual(config2.process_name, "PersistentApp.exe")
 
         panel2.close()

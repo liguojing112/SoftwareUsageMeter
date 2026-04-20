@@ -11,14 +11,14 @@ import sys
 
 def get_app_dir():
     """获取应用所在目录（兼容 PyInstaller 打包后的路径）"""
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 
 def hash_password(password: str) -> str:
     """对密码进行 SHA-256 哈希"""
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
 def verify_password(password: str, hashed: str) -> bool:
@@ -27,12 +27,14 @@ def verify_password(password: str, hashed: str) -> bool:
 
 
 DEFAULT_CONFIG = {
-    "rate": 1.0,                    # 计时单价（元/分钟）
+    "rate": 1.0,  # 计时单价（元/分钟）
+    "export_rate": 0.0,  # 单张导出单价（元/张）
+    "default_export_count": 1,  # 默认导出张数（OCR失败时使用）
     "admin_password": hash_password("admin"),  # 默认密码: admin
-    "qr_code_path": "",             # 收款码图片路径
+    "qr_code_path": "",  # 收款码图片路径
     "process_name": "PixCake.exe",  # 像素蛋糕进程名
     "export_window_keywords": ["导出", "Export"],  # 导出窗口关键词
-    "monitor_interval_ms": 2000,    # 进程监控间隔（毫秒）
+    "monitor_interval_ms": 2000,  # 进程监控间隔（毫秒）
 }
 
 
@@ -48,7 +50,7 @@ class ConfigManager:
         """从文件加载配置，不存在则使用默认值"""
         if os.path.exists(self._config_path):
             try:
-                with open(self._config_path, 'r', encoding='utf-8') as f:
+                with open(self._config_path, "r", encoding="utf-8") as f:
                     saved = json.load(f)
                 # 合并：已保存的值覆盖默认值，新增字段使用默认值
                 self._config = {**DEFAULT_CONFIG, **saved}
@@ -59,7 +61,7 @@ class ConfigManager:
 
     def save(self):
         """保存配置到文件"""
-        with open(self._config_path, 'w', encoding='utf-8') as f:
+        with open(self._config_path, "w", encoding="utf-8") as f:
             json.dump(self._config, f, ensure_ascii=False, indent=2)
 
     def get(self, key, default=None):
@@ -83,6 +85,14 @@ class ConfigManager:
     @property
     def admin_password(self) -> str:
         return self._config.get("admin_password", hash_password("admin"))
+
+    @property
+    def export_rate(self) -> float:
+        return float(self._config.get("export_rate", 0.0))
+
+    @property
+    def default_export_count(self) -> int:
+        return int(self._config.get("default_export_count", 1))
 
     @property
     def qr_code_path(self) -> str:

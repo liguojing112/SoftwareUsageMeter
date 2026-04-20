@@ -31,7 +31,9 @@ _LOCKED_HWND_REGISTRY = set()
 
 
 def _unlock_registered_windows():
-    """Python 姝ｅ父閫€鍑烘椂鍏ㄩ噺鎭㈠鎵€鏈夊凡琚攣瀹氱殑绐楀彛銆?"""
+    """Python 正常退出时恢复所有已被锁定的窗口。"""
+
+
     if not HAS_WIN32:
         return
 
@@ -54,6 +56,32 @@ class _InlineConfig:
 
     def __init__(self, qr_code_path: str = ""):
         self.qr_code_path = qr_code_path
+        self.rate = 1.0
+        self.export_rate = 0.0
+
+
+def calculate_payment_details(
+    duration_minutes: int,
+    rate: float,
+    export_count: int = 0,
+    export_rate: float = 0.0,
+) -> dict:
+    """统一计算计时费用、导出费用和合计金额。"""
+    duration_minutes = max(int(duration_minutes), 0)
+    export_count = max(int(export_count), 0)
+    rate = max(float(rate), 0.0)
+    export_rate = max(float(export_rate), 0.0)
+    time_total = duration_minutes * rate
+    export_total = export_count * export_rate
+    return {
+        "duration_minutes": duration_minutes,
+        "rate": rate,
+        "export_count": export_count,
+        "export_rate": export_rate,
+        "time_total": time_total,
+        "export_total": export_total,
+        "total": time_total + export_total,
+    }
 
 
 class PaymentOverlay(QWidget):
@@ -71,7 +99,12 @@ class PaymentOverlay(QWidget):
         self._keep_top_timer.timeout.connect(self._keep_on_top)
 
         self._init_ui()
-        self.update_display(0, float(getattr(self._config, "rate", 1.0)))
+        self.update_display(
+            0,
+            float(getattr(self._config, "rate", 1.0)),
+            export_count=0,
+            export_rate=float(getattr(self._config, "export_rate", 0.0)),
+        )
         self._load_qr_code()
         self._confirm_btn.pressed.connect(self._emit_payment_completed)
 
@@ -127,6 +160,26 @@ class PaymentOverlay(QWidget):
         self._rate_label.setFont(QFont("Microsoft YaHei", 28))
         self._rate_label.setStyleSheet("color: #FFFFFF;")
         info_container.addWidget(self._rate_label)
+
+        self._time_amount_label = QLabel("计时费用：¥ 0.00")
+        self._time_amount_label.setFont(QFont("Microsoft YaHei", 24))
+        self._time_amount_label.setStyleSheet("color: #CFD8DC;")
+        info_container.addWidget(self._time_amount_label)
+
+        self._export_count_label = QLabel("导出张数：0 张")
+        self._export_count_label.setFont(QFont("Microsoft YaHei", 28))
+        self._export_count_label.setStyleSheet("color: #FFFFFF;")
+        info_container.addWidget(self._export_count_label)
+
+        self._export_rate_label = QLabel("单张导出单价：¥ 0.00 元/张")
+        self._export_rate_label.setFont(QFont("Microsoft YaHei", 28))
+        self._export_rate_label.setStyleSheet("color: #FFFFFF;")
+        info_container.addWidget(self._export_rate_label)
+
+        self._export_amount_label = QLabel("导出费用：¥ 0.00")
+        self._export_amount_label.setFont(QFont("Microsoft YaHei", 24))
+        self._export_amount_label.setStyleSheet("color: #CFD8DC;")
+        info_container.addWidget(self._export_amount_label)
 
         self._amount_label = QLabel("合计金额：¥ --")
         self._amount_label.setFont(QFont("Microsoft YaHei", 36, QFont.Bold))
@@ -196,7 +249,15 @@ class PaymentOverlay(QWidget):
         footer.setAlignment(Qt.AlignCenter)
         layout.addWidget(footer)
 
-    def show_payment(self, minutes: int, rate: float, hwnd=None, lock_targets=None):
+    def show_payment(
+        self,
+        minutes: int,
+        rate: float,
+        hwnd=None,
+        lock_targets=None,
+        export_count: int = 0,
+        export_rate: float = 0.0,
+    ):
         """
         显示收费弹窗
         :param minutes: 使用分钟数
@@ -205,7 +266,7 @@ class PaymentOverlay(QWidget):
         :param lock_targets: 需要统一锁定的窗口句柄列表
         """
         # 更新显示
-        self.update_display(minutes, rate)
+        self.update_display(minutes, rate, export_count=export_count, export_rate=export_rate)
         self._payment_completion_emitted = False
 
         # 通过全屏置顶遮罩层阻断操作，避免直接禁用外部窗口导致异常退出后残留不可点击状态
@@ -223,12 +284,27 @@ class PaymentOverlay(QWidget):
         # 启动置顶保持定时器
         self._keep_top_timer.start()
 
-    def update_display(self, duration_minutes: int, rate: float):
+    def update_display(
+        self,
+        duration_minutes: int,
+        rate: float,
+        export_count: int = 0,
+        export_rate: float = 0.0,
+    ):
         """单独更新弹窗金额信息，便于调试和测试。"""
-        self._time_label.setText(f"使用时长：{duration_minutes} 分钟")
-        self._rate_label.setText(f"计时单价：{rate:.2f} 元/分钟")
-        total = duration_minutes * rate
-        self._amount_label.setText(f"合计金额：¥ {total:.2f}")
+        details = calculate_payment_details(
+            duration_minutes=duration_minutes,
+            rate=rate,
+            export_count=export_count,
+            export_rate=export_rate,
+        )
+        self._time_label.setText(f"使用时长：{details['duration_minutes']} 分钟")
+        self._rate_label.setText(f"计时单价：¥ {details['rate']:.2f} 元/分钟")
+        self._export_count_label.setText(f"导出张数：{details['export_count']} 张")
+        self._export_rate_label.setText(f"单张导出单价：¥ {details['export_rate']:.2f} 元/张")
+        self._time_amount_label.setText(f"计时费用：¥ {details['time_total']:.2f}")
+        self._export_amount_label.setText(f"导出费用：¥ {details['export_total']:.2f}")
+        self._amount_label.setText(f"合计金额：¥ {details['total']:.2f}")
 
     def _lock_windows(self, handles: list[int]):
         """锁定像素蛋糕相关窗口，防止收费前继续操作。"""
@@ -375,6 +451,22 @@ class PaymentOverlay(QWidget):
     @property
     def rate_label(self) -> QLabel:
         return self._rate_label
+
+    @property
+    def export_count_label(self) -> QLabel:
+        return self._export_count_label
+
+    @property
+    def export_rate_label(self) -> QLabel:
+        return self._export_rate_label
+
+    @property
+    def time_amount_label(self) -> QLabel:
+        return self._time_amount_label
+
+    @property
+    def export_amount_label(self) -> QLabel:
+        return self._export_amount_label
 
     @property
     def amount_label(self) -> QLabel:

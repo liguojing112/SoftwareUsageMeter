@@ -88,6 +88,7 @@ class TestConfigManager(unittest.TestCase):
 
         # 检查默认值
         self.assertEqual(config.rate, 1.0)
+        self.assertEqual(config.export_rate, 0.0)
         self.assertEqual(config.process_name, "PixCake.exe")
         self.assertIn("导出", config.export_window_keywords)
         self.assertIn("Export", config.export_window_keywords)
@@ -103,6 +104,7 @@ class TestConfigManager(unittest.TestCase):
         config.update(
             {
                 "rate": 2.5,
+                "export_rate": 3.0,
                 "process_name": "TestApp.exe",
                 "export_window_keywords": ["保存", "Save"],
                 "monitor_interval_ms": 3000,
@@ -111,6 +113,7 @@ class TestConfigManager(unittest.TestCase):
 
         # 验证修改生效
         self.assertEqual(config.rate, 2.5)
+        self.assertEqual(config.export_rate, 3.0)
         self.assertEqual(config.process_name, "TestApp.exe")
         self.assertIn("保存", config.export_window_keywords)
         self.assertEqual(config.monitor_interval_ms, 3000)
@@ -121,6 +124,7 @@ class TestConfigManager(unittest.TestCase):
         # 重新加载配置验证持久化
         config2 = ConfigManager()
         self.assertEqual(config2.rate, 2.5)
+        self.assertEqual(config2.export_rate, 3.0)
         self.assertEqual(config2.process_name, "TestApp.exe")
 
         print("✓ 配置保存加载测试通过")

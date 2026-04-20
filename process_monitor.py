@@ -6,23 +6,35 @@
 3. 获取目标程序的窗口句柄
 """
 
+import json
 import logging
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 import time
+import ctypes
+from datetime import datetime
 
 import psutil
 from PyQt5.QtCore import QThread, pyqtSignal
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 
 try:
     import win32gui
     import win32con
+    import win32api
     import win32process
+    import win32ui
+
     HAS_WIN32 = True
 except ImportError:
     HAS_WIN32 = False
 
 try:
     from PIL import ImageGrab
+
     HAS_IMAGE_GRAB = True
 except ImportError:
     HAS_IMAGE_GRAB = False
@@ -43,6 +55,10 @@ EXPORT_PROCESS_MARKERS = [
     "export-single-process",
 ]
 
+EXPORT_WINDOW_TITLE_EXCLUDES = [
+    "确认删除该导出进度",
+]
+
 LOCK_WINDOW_TITLE_EXCLUDES = [
     "default ime",
     "msctfime ui",
@@ -57,17 +73,127 @@ PROCESS_STARTUP_GUARD_SECONDS = 3.0
 EXPORT_DETECTION_DEBOUNCE_SECONDS = 0.8
 EXPORT_CLEAR_DEBOUNCE_SECONDS = 0.8
 EXPORT_VISUAL_DETECTION_DEBOUNCE_SECONDS = 0.0
-RUNNING_MONITOR_INTERVAL_MS = 200
+RUNNING_MONITOR_INTERVAL_MS = 100
 POST_PAYMENT_EXPORT_CLEAR_DEBOUNCE_SECONDS = 12.0
+EXPORT_COUNT_REFRESH_INTERVAL_SECONDS = 1.0
+EXPORT_COUNT_CACHE_TTL_SECONDS = 30.0
+EXPORT_SUMMARY_PROBE_INTERVAL_SECONDS = 0.3
+CENTERED_DIALOG_SCAN_INTERVAL_SECONDS = 4.0
+CENTERED_DIALOG_DEBUG_DUMP_INTERVAL_SECONDS = 6.0
+EXPORT_DEBUG_MAX_BUNDLES = 12
+EXPORT_DEBUG_DIRNAME = "debug_export_captures"
+FAST_SUMMARY_OCR_TIMEOUT_SECONDS = 0.9
+WINDOWS_OCR_TIMEOUT_SECONDS = 2.0
+CENTERED_DIALOG_SCAN_REGIONS = [
+    (0.15, 0.12, 0.48, 0.25),
+    (0.10, 0.08, 0.55, 0.32),
+]
+EXPORT_COUNT_CONTEXT_KEYWORDS = [
+    "快速导出",
+    "导出至",
+    "指定文件夹",
+    "图片格式",
+    "质量",
+    "jpg",
+    "自定义设置",
+]
+CREATIVE_SELECTION_CONTEXT_KEYWORDS = [
+    "选图",
+    "当前图",
+    "全创意",
+    "至创意",
+    "创意模块",
+    "导出选择图",
+    "导出当前图",
+]
+EXPORT_BUTTON_TEXT_KEYWORDS = [
+    "导出",
+    "export",
+]
+
+OCR_TEXT_REPLACEMENTS = [
+    ("导出选择图", "导出选择图"),
+    ("导出当前图", "导出当前图"),
+    ("导出至创意", "导出至创意"),
+    ("取肖", "取消"),
+    ("学选图", "选图"),
+    ("选图前图", "选图当前图"),
+    ("前图图", "当前图"),
+    ("ѡͼ", "选图"),
+    ("ԭͼ", "原图"),
+    ("Чͼ", "效图"),
+    ("ͼƬ", "图片"),
+    ("ǰͼ", "前图"),
+    ("ԭʼ", "原始"),
+    ("ģ֧", "模支"),
+]
+
+OCR_CHAR_REPLACEMENTS = str.maketrans(
+    {
+        "ѡ": "选",
+        "ԭ": "原",
+        "Ч": "效",
+        "ͼ": "图",
+        "Ƭ": "片",
+        "ǰ": "前",
+        "ʼ": "始",
+        "ȡ": "取",
+        "Ф": "消",
+        "ģ": "模",
+        "֧": "支",
+    }
+)
+
+if hasattr(Image, "Resampling"):
+    RESAMPLING_LANCZOS = Image.Resampling.LANCZOS
+else:
+    RESAMPLING_LANCZOS = Image.LANCZOS
+
+WINDOWS_OCR_SCRIPT_TEMPLATE = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]
+$null = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage.Streams, ContentType=WindowsRuntime]
+$null = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType=WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType=WindowsRuntime]
+$null = [Windows.Media.Ocr.OcrResult, Windows.Media.Ocr, ContentType=WindowsRuntime]
+
+function Await-AsyncOperation($operation, $resultType) {
+    $method = [System.WindowsRuntimeSystemExtensions].GetMethods() |
+        Where-Object {
+            $_.Name -eq 'AsTask' -and $_.IsGenericMethodDefinition -and
+            $_.GetGenericArguments().Count -eq 1 -and $_.GetParameters().Count -eq 1
+        } |
+        Select-Object -First 1
+    $generic = $method.MakeGenericMethod($resultType)
+    $task = $generic.Invoke($null, @($operation))
+    return $task.Result
+}
+
+$path = '__IMAGE_PATH__'
+$fileOp = [Windows.Storage.StorageFile]::GetFileFromPathAsync($path)
+$file = Await-AsyncOperation $fileOp ([Windows.Storage.StorageFile])
+$streamOp = $file.OpenAsync([Windows.Storage.FileAccessMode]::Read)
+$stream = Await-AsyncOperation $streamOp ([Windows.Storage.Streams.IRandomAccessStream])
+$decoderOp = [Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)
+$decoder = Await-AsyncOperation $decoderOp ([Windows.Graphics.Imaging.BitmapDecoder])
+$bitmapOp = $decoder.GetSoftwareBitmapAsync()
+$bitmap = Await-AsyncOperation $bitmapOp ([Windows.Graphics.Imaging.SoftwareBitmap])
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+$resultOp = $engine.RecognizeAsync($bitmap)
+$result = Await-AsyncOperation $resultOp ([Windows.Media.Ocr.OcrResult])
+$result.Text
+"""
 
 
 def find_pid_by_name(process_name: str) -> int | None:
     """通过进程名查找 PID，未找到返回 None"""
     process_name_lower = process_name.lower()
-    for proc in psutil.process_iter(['pid', 'name']):
+    for proc in psutil.process_iter(["pid", "name"]):
         try:
-            if proc.info['name'] and proc.info['name'].lower() == process_name_lower:
-                return proc.info['pid']
+            if proc.info["name"] and proc.info["name"].lower() == process_name_lower:
+                return proc.info["pid"]
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return None
@@ -147,8 +273,10 @@ def normalize_export_keywords(keywords: list[str]) -> list[str]:
 
 def window_matches_keywords(hwnd: int, keywords: list[str]) -> bool:
     """根据窗口标题匹配导出相关窗口。"""
-    title = get_window_title(hwnd).lower()
+    title = get_window_title(hwnd).strip().lower()
     if not title:
+        return False
+    if any(excluded in title for excluded in EXPORT_WINDOW_TITLE_EXCLUDES):
         return False
     return any(keyword in title for keyword in keywords)
 
@@ -201,19 +329,25 @@ def find_export_worker_pids(root_pid: int) -> set[int]:
     return worker_pids
 
 
-def get_new_export_worker_pids(worker_pids: set[int] | None, known_worker_pids: set[int] | None) -> set[int]:
+def get_new_export_worker_pids(
+    worker_pids: set[int] | None, known_worker_pids: set[int] | None
+) -> set[int]:
     """计算本轮新出现的导出 worker，忽略启动前就已存在的常驻进程。"""
     return set(worker_pids or set()) - set(known_worker_pids or set())
 
 
-def is_within_guard_window(now: float, started_at: float | None, guard_seconds: float) -> bool:
+def is_within_guard_window(
+    now: float, started_at: float | None, guard_seconds: float
+) -> bool:
     """判断当前是否仍处于启动保护时间窗内。"""
     if not started_at:
         return False
     return (now - started_at) < max(guard_seconds, 0.0)
 
 
-def is_debounce_satisfied(since: float | None, now: float, debounce_seconds: float) -> bool:
+def is_debounce_satisfied(
+    since: float | None, now: float, debounce_seconds: float
+) -> bool:
     """判断某个候选状态是否已连续维持到达防抖阈值。"""
     if since is None:
         return False
@@ -255,13 +389,20 @@ def resume_processes(pids: set[int] | list[int] | tuple[int, ...]) -> list[int]:
 
 def image_matches_export_visual_state(image: Image.Image) -> bool:
     """根据界面视觉特征判断是否处于像素蛋糕导出页。"""
+    return locate_export_button_bounds(image) is not None
+
+
+def locate_export_button_bounds(
+    image: Image.Image,
+) -> tuple[int, int, int, int] | None:
+    """定位快速导出页右下角黄色导出按钮的近似范围。"""
     if image is None:
-        return False
+        return None
 
     image = image.convert("RGB")
     width, height = image.size
     if width < 500 or height < 350:
-        return False
+        return None
 
     start_x = int(width * 0.55)
     start_y = int(height * 0.60)
@@ -283,28 +424,34 @@ def image_matches_export_visual_state(image: Image.Image) -> bool:
                 max_y = max(max_y, y)
 
     if yellow_count == 0:
-        return False
+        return None
 
     box_width = max_x - min_x + 1
     box_height = max_y - min_y + 1
     box_area = max(box_width * box_height, 1)
     fill_ratio = yellow_count / box_area
 
-    return all([
-        yellow_count >= max(int(width * height * 0.002), 1500),
-        min_x >= int(width * 0.65),
-        min_y >= int(height * 0.75),
-        max_x >= int(width * 0.82),
-        max_y >= int(height * 0.88),
-        int(width * 0.08) <= box_width <= int(width * 0.35),
-        int(height * 0.04) <= box_height <= int(height * 0.16),
-        fill_ratio >= 0.35,
-    ])
+    is_match = all(
+        [
+            yellow_count >= max(int(width * height * 0.002), 1500),
+            min_x >= int(width * 0.65),
+            min_y >= int(height * 0.75),
+            max_x >= int(width * 0.82),
+            max_y >= int(height * 0.88),
+            int(width * 0.08) <= box_width <= int(width * 0.35),
+            int(height * 0.04) <= box_height <= int(height * 0.16),
+            fill_ratio >= 0.35,
+        ]
+    )
+    if not is_match:
+        return None
+
+    return (min_x, min_y, max_x, max_y)
 
 
 def capture_window_image(hwnd: int) -> Image.Image | None:
     """截取指定窗口当前屏幕内容。"""
-    if not HAS_WIN32 or not HAS_IMAGE_GRAB or not hwnd:
+    if not HAS_WIN32 or not hwnd:
         return None
     try:
         if not win32gui.IsWindow(hwnd):
@@ -312,8 +459,79 @@ def capture_window_image(hwnd: int) -> Image.Image | None:
         left, top, right, bottom = win32gui.GetWindowRect(hwnd)
         if right - left < 500 or bottom - top < 350:
             return None
+        image = _capture_window_image_printwindow(hwnd, left, top, right, bottom)
+        if image is not None:
+            return image
+        if not HAS_IMAGE_GRAB:
+            return None
         return ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
     except Exception:
+        return None
+
+
+def _capture_window_image_printwindow(
+    hwnd: int,
+    left: int | None = None,
+    top: int | None = None,
+    right: int | None = None,
+    bottom: int | None = None,
+) -> Image.Image | None:
+    """优先通过 PrintWindow 抓取窗口内容，避免依赖窗口必须处于前台。"""
+    if not HAS_WIN32 or not hwnd:
+        return None
+
+    try:
+        if not win32gui.IsWindow(hwnd):
+            return None
+        if None in (left, top, right, bottom):
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        width = max(int(right - left), 0)
+        height = max(int(bottom - top), 0)
+        if width < 500 or height < 350:
+            return None
+
+        hwnd_dc = win32gui.GetWindowDC(hwnd)
+        if not hwnd_dc:
+            return None
+
+        source_dc = None
+        memory_dc = None
+        bitmap = None
+        try:
+            source_dc = win32ui.CreateDCFromHandle(hwnd_dc)
+            memory_dc = source_dc.CreateCompatibleDC()
+            bitmap = win32ui.CreateBitmap()
+            bitmap.CreateCompatibleBitmap(source_dc, width, height)
+            memory_dc.SelectObject(bitmap)
+
+            printed = ctypes.windll.user32.PrintWindow(hwnd, memory_dc.GetSafeHdc(), 0x2)
+            if printed != 1:
+                printed = ctypes.windll.user32.PrintWindow(hwnd, memory_dc.GetSafeHdc(), 0x0)
+            if printed != 1:
+                return None
+
+            bitmap_info = bitmap.GetInfo()
+            bitmap_bits = bitmap.GetBitmapBits(True)
+            image = Image.frombuffer(
+                "RGB",
+                (bitmap_info["bmWidth"], bitmap_info["bmHeight"]),
+                bitmap_bits,
+                "raw",
+                "BGRX",
+                0,
+                1,
+            )
+            return image.copy()
+        finally:
+            if bitmap is not None:
+                win32gui.DeleteObject(bitmap.GetHandle())
+            if memory_dc is not None:
+                memory_dc.DeleteDC()
+            if source_dc is not None:
+                source_dc.DeleteDC()
+            win32gui.ReleaseDC(hwnd, hwnd_dc)
+    except Exception as exc:
+        logger.debug("PrintWindow 截图失败: hwnd=%s, error=%s", hwnd, exc)
         return None
 
 
@@ -321,6 +539,746 @@ def detect_export_visual_state(main_hwnd: int | None) -> bool:
     """通过界面截图识别像素蛋糕的快速导出页。"""
     image = capture_window_image(main_hwnd) if main_hwnd else None
     return image_matches_export_visual_state(image) if image else False
+
+
+def run_windows_ocr(
+    image_path: str, timeout_seconds: float = WINDOWS_OCR_TIMEOUT_SECONDS
+) -> str:
+    """调用 Windows 自带 OCR 识别截图文本，无需额外安装第三方环境。"""
+    if os.name != "nt" or not image_path or not os.path.exists(image_path):
+        return ""
+
+    startupinfo = None
+    if hasattr(subprocess, "STARTUPINFO"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+
+    escaped_path = image_path.replace("'", "''")
+    script = WINDOWS_OCR_SCRIPT_TEMPLATE.replace("__IMAGE_PATH__", escaped_path)
+
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=timeout_seconds,
+            startupinfo=startupinfo,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("调用 Windows OCR 失败: %s", exc)
+        return ""
+
+    if completed.returncode != 0:
+        logger.warning("Windows OCR 返回异常: %s", completed.stderr.strip())
+        return ""
+
+    return (completed.stdout or "").strip()
+
+
+def run_windows_ocr_on_image(
+    image: Image.Image | None,
+    prefix: str = "ocr",
+    timeout_seconds: float = WINDOWS_OCR_TIMEOUT_SECONDS,
+) -> str:
+    """将 PIL 图像临时落盘后交给 Windows OCR。"""
+    if image is None:
+        return ""
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix=f"{prefix}_", suffix=".png", delete=False
+        ) as handle:
+            temp_path = handle.name
+        image.save(temp_path, format="PNG")
+        return run_windows_ocr(temp_path, timeout_seconds=timeout_seconds)
+    except Exception as exc:
+        logger.warning("图像 OCR 失败: %s", exc)
+        return ""
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def normalize_ocr_text(text: str) -> str:
+    """规范化 OCR 文本，便于后续规则匹配。"""
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact:
+        return ""
+
+    compact = compact.translate(OCR_CHAR_REPLACEMENTS)
+    for source, target in OCR_TEXT_REPLACEMENTS:
+        compact = compact.replace(source, target)
+    return compact
+
+
+def contains_export_page_context(text: str) -> bool:
+    """判断 OCR 文本是否像像素蛋糕导出页。"""
+    compact = normalize_ocr_text(text)
+    if not compact:
+        return False
+
+    has_local_export_context = any(
+        keyword in compact for keyword in EXPORT_COUNT_CONTEXT_KEYWORDS
+    )
+    has_creative_selection_context = any(
+        keyword in compact for keyword in CREATIVE_SELECTION_CONTEXT_KEYWORDS
+    )
+
+    if has_creative_selection_context and not has_local_export_context:
+        return False
+
+    if has_local_export_context:
+        return True
+
+    if re.search(r"导出\d+张", compact):
+        return True
+
+    return bool(
+        re.search(r"(精修|免费|原图)[^0-9]{0,8}[（(]?\d+[）)]?", compact)
+    )
+
+
+def contains_export_button_text(text: str) -> bool:
+    """判断按钮 OCR 文本是否像“导出”按钮。"""
+    compact = normalize_ocr_text(text).lower()
+    if not compact:
+        return False
+
+    return any(keyword in compact for keyword in EXPORT_BUTTON_TEXT_KEYWORDS)
+
+
+def _crop_relative(
+    image: Image.Image, region: tuple[float, float, float, float]
+) -> Image.Image | None:
+    """按相对比例裁剪图像。"""
+    width, height = image.size
+    left = max(int(width * region[0]), 0)
+    top = max(int(height * region[1]), 0)
+    right = min(int(width * region[2]), width)
+    bottom = min(int(height * region[3]), height)
+    if right - left < 40 or bottom - top < 24:
+        return None
+    return image.crop((left, top, right, bottom))
+
+
+def _crop_summary_from_button_anchor(
+    image: Image.Image,
+    button_bounds: tuple[int, int, int, int] | None,
+    widen: bool = False,
+) -> Image.Image | None:
+    """根据黄色导出按钮反推出其上方的导出摘要区。"""
+    if image is None or button_bounds is None:
+        return None
+
+    width, height = image.size
+    bx1, by1, bx2, by2 = button_bounds
+    button_width = max(bx2 - bx1, 1)
+    button_height = max(by2 - by1, 1)
+
+    left_factor = 5.2 if widen else 4.8
+    right_factor = 0.9 if widen else 0.6
+    top_factor = 10.2 if widen else 9.2
+    height_factor = 3.0 if widen else 2.4
+
+    left = max(int(bx1 - button_width * left_factor), 0)
+    top = max(int(by1 - button_height * top_factor), 0)
+    right = min(
+        max(int(bx2 + button_width * right_factor), left + int(button_width * 4.8)),
+        width,
+    )
+    bottom = min(max(int(top + button_height * height_factor), top + 24), height)
+
+    if right - left < 40 or bottom - top < 24:
+        return None
+    return image.crop((left, top, right, bottom))
+
+
+def _prepare_export_count_ocr_variants(
+    image: Image.Image,
+    cache_mode: bool = False,
+    dialog_mode: bool = False,
+    button_bounds: tuple[int, int, int, int] | None = None,
+) -> list[tuple[str, Image.Image]]:
+    """构建导出张数 OCR 变体，深色 UI 会做放大和增强。"""
+    if image is None:
+        return []
+
+    width, height = image.size
+    if width < 120 or height < 80:
+        return [("full", image)]
+
+    if dialog_mode:
+        relative_regions = [
+            ("summary", (0.04, 0.08, 0.84, 0.24)),
+            ("summary_wide", (0.02, 0.04, 0.92, 0.28)),
+        ]
+        if not cache_mode:
+            relative_regions.append(("header_and_counts", (0.0, 0.0, 0.94, 0.34)))
+    else:
+        relative_regions = [
+            ("summary_popup_title", (0.03, 0.02, 0.45, 0.18)),
+            ("summary_popup_title_wide", (0.02, 0.02, 0.58, 0.20)),
+            ("summary", (0.02, 0.08, 0.52, 0.24)),
+            ("summary_center", (0.18, 0.12, 0.66, 0.30)),
+            ("type_counts", (0.02, 0.18, 0.78, 0.37)),
+        ]
+        if not cache_mode:
+            relative_regions.extend(
+                [
+                    ("summary_wide", (0.0, 0.0, 0.72, 0.28)),
+                    ("summary_wide_center", (0.12, 0.06, 0.82, 0.34)),
+                    ("header_and_counts", (0.0, 0.0, 0.86, 0.45)),
+                    ("header_and_counts_center", (0.10, 0.04, 0.86, 0.42)),
+                ]
+            )
+
+    variants: list[tuple[str, Image.Image]] = []
+    seen_sizes: set[tuple[str, tuple[int, int]]] = set()
+
+    def add_variant(label: str, variant: Image.Image):
+        key = (label, variant.size)
+        if key in seen_sizes:
+            return
+        seen_sizes.add(key)
+        variants.append((label, variant))
+
+    def build_variant_set(base_label: str, base_image: Image.Image, include_binary: bool):
+        base_width, base_height = base_image.size
+        scaled = base_image.resize(
+            (max(base_width * 2, 1), max(base_height * 2, 1)),
+            RESAMPLING_LANCZOS,
+        )
+        add_variant(f"{base_label}-rgb2x", scaled)
+
+        grayscale = ImageOps.grayscale(scaled)
+        contrasted = ImageEnhance.Contrast(ImageOps.autocontrast(grayscale)).enhance(1.8)
+        sharpened = ImageEnhance.Sharpness(contrasted).enhance(2.2)
+        add_variant(f"{base_label}-gray2x", sharpened)
+
+        if include_binary:
+            binary = sharpened.point(lambda value: 255 if value >= 148 else 0).convert(
+                "L"
+            )
+            add_variant(f"{base_label}-binary2x", ImageOps.invert(binary))
+
+    anchored_summary = _crop_summary_from_button_anchor(
+        image, button_bounds, widen=False
+    )
+    if anchored_summary is not None:
+        build_variant_set("summary_anchor", anchored_summary, include_binary=not cache_mode)
+
+    anchored_summary_wide = _crop_summary_from_button_anchor(
+        image, button_bounds, widen=True
+    )
+    if anchored_summary_wide is not None:
+        build_variant_set(
+            "summary_anchor_wide", anchored_summary_wide, include_binary=not cache_mode
+        )
+
+    for label, region in relative_regions:
+        cropped = _crop_relative(image, region)
+        if cropped is None:
+            continue
+        build_variant_set(label, cropped, include_binary=not cache_mode)
+
+    if not cache_mode:
+        build_variant_set("full", image, include_binary=False)
+
+    return variants
+
+
+def extract_export_image_count_from_text(
+    text: str, allow_numeric_fallback: bool = True
+) -> int | None:
+    """从 OCR 文本中提取导出张数。"""
+    if not text:
+        logger.debug("OCR文本为空")
+        return None
+
+    logger.debug(f"原始OCR文本: '{text}'")
+    compact = normalize_ocr_text(text)
+    logger.debug(f"紧凑化OCR文本: '{compact}'")
+
+    if not compact:
+        return None
+
+    has_export_context = contains_export_page_context(compact)
+
+    # 尝试多种匹配模式
+    patterns = [
+        (r"导出(\d+)张图片", "直接匹配: 导出X张图片"),
+        (r"导出(\d+)张图", "直接匹配: 导出X张图"),
+        (r"导出(\d+)张", "通用匹配: 导出X张"),
+        (r"(\d+)张图片", "简单匹配: X张图片"),
+        (r"图片(\d+)张", "倒序匹配: 图片X张"),
+        (r"共(\d+)张", "总计匹配: 共X张"),
+        (r"总计(\d+)张", "总计匹配2: 总计X张"),
+    ]
+
+    for pattern, description in patterns:
+        match = re.search(pattern, compact)
+        if match:
+            count = int(match.group(1))
+            logger.debug(f"{description}: 找到 {count} 张")
+            return count
+
+    # 尝试分类统计模式
+    per_type_counts = []
+    type_patterns = [
+        (r"精修效果图[（(](\d+)[）)]", "精修效果图"),
+        (r"免费效果图[（(](\d+)[）)]", "免费效果图"),
+        (r"原图[（(](\d+)[）)]", "原图"),
+        (r"精修[（(](\d+)[）)]", "精修"),
+        (r"免费[（(](\d+)[）)]", "免费"),
+    ]
+
+    for pattern, type_name in type_patterns:
+        match = re.search(pattern, compact)
+        if match:
+            count = int(match.group(1))
+            logger.debug(f"找到{type_name}: {count} 张")
+            per_type_counts.append(count)
+
+    if per_type_counts:
+        total = sum(per_type_counts)
+        logger.debug(f"分类统计总计: {total} 张 (来自 {len(per_type_counts)} 个分类)")
+        return total
+
+    # 尝试查找纯数字（可能是导出数量）
+    numbers = re.findall(r"(\d+)", compact)
+    if allow_numeric_fallback and numbers and has_export_context:
+        logger.debug(f"找到数字: {numbers}")
+        # 如果只有一个数字，可能是导出数量
+        if len(numbers) == 1:
+            count = int(numbers[0])
+            if count > 0 and count <= 100:  # 合理范围
+                logger.debug(f"使用唯一数字作为导出数量: {count}")
+                return count
+
+    logger.debug("未找到导出张数匹配")
+    return None
+
+
+def extract_export_summary_count_from_text(text: str) -> int | None:
+    """只针对左上角摘要文案提取导出张数，避免被分类区和路径区带偏。"""
+    compact = normalize_ocr_text(text)
+    if not compact:
+        return None
+
+    patterns = [
+        r"导出(\d+)张图片",
+        r"导出(\d+)张图",
+        r"导出(\d+)张",
+        r"(\d+)张图片",
+        r"(\d+)张图",
+        r"(?:^|[^\d])(\d+)图片",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, compact)
+        if match:
+            return int(match.group(1))
+
+    return None
+
+
+def extract_export_count_from_variant_text(
+    variant_name: str, text: str
+) -> int | None:
+    """结合变体区域语义，对 OCR 结果做更宽松的数字兜底。"""
+    export_count = extract_export_image_count_from_text(
+        text, allow_numeric_fallback=False
+    )
+    if export_count is not None:
+        return export_count
+
+    compact = normalize_ocr_text(text)
+    if not compact:
+        return None
+
+    numbers = [int(value) for value in re.findall(r"(\d+)", compact)]
+    plausible_numbers = [value for value in numbers if 0 <= value <= 100]
+    if not plausible_numbers:
+        return None
+
+    has_path_like_noise = any(token in compact.lower() for token in ["/", "\\", ".py", ".png", "user", "download", "windows", ":"])
+    has_ascii_noise = bool(re.search(r"[A-Za-z]{2,}", compact))
+
+    if variant_name.startswith("summary-"):
+        positives = [value for value in plausible_numbers if value > 0]
+        if (
+            len(positives) == 1
+            and len(compact) <= 20
+            and not has_path_like_noise
+            and not has_ascii_noise
+        ):
+            logger.info(
+                "导出张数数字兜底命中(summary): %s (variant=%s, text=%s)",
+                positives[0],
+                variant_name,
+                compact[:80],
+            )
+            return positives[0]
+
+    if variant_name.startswith("type_counts-"):
+        if has_path_like_noise or has_ascii_noise:
+            return None
+        if not re.search(r"(精修|免费|原图|[（(]\d+[)）])", compact):
+            return None
+        candidate_numbers = [value for value in plausible_numbers[:3] if value <= 20]
+        if (
+            len(candidate_numbers) >= 2
+            and candidate_numbers
+            and any(value > 0 for value in candidate_numbers)
+        ):
+            total = sum(candidate_numbers)
+            logger.info(
+                "导出张数数字兜底命中(type_counts): %s (variant=%s, text=%s)",
+                total,
+                variant_name,
+                compact[:80],
+            )
+            return total
+
+    return None
+
+
+def detect_export_summary_count_from_image(
+    image: Image.Image | None,
+    dialog_mode: bool = False,
+    button_bounds: tuple[int, int, int, int] | None = None,
+    fast_mode: bool = False,
+) -> int | None:
+    """优先从导出页左上角摘要区识别张数。"""
+    if image is None:
+        return None
+
+    variants = [
+        item
+        for item in _prepare_export_count_ocr_variants(
+            image,
+            cache_mode=True,
+            dialog_mode=dialog_mode,
+            button_bounds=button_bounds,
+        )
+        if item[0].startswith("summary")
+    ]
+    if fast_mode:
+        fast_variant_priority = {
+            "summary_anchor_wide-rgb2x": 0,
+            "summary_anchor-rgb2x": 1,
+            "summary_popup_title_wide-rgb2x": 2,
+            "summary_popup_title-rgb2x": 3,
+            "summary_wide_center-rgb2x": 4,
+            "summary_center-rgb2x": 5,
+            "summary_wide-rgb2x": 6,
+            "summary-rgb2x": 7,
+        }
+        variants.sort(key=lambda item: fast_variant_priority.get(item[0], 100))
+        variants = variants[:4]
+
+    for variant_name, variant in variants:
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="export_summary_", suffix=".png", delete=False
+            ) as handle:
+                temp_path = handle.name
+            variant.save(temp_path, format="PNG")
+            ocr_text = run_windows_ocr(
+                temp_path,
+                timeout_seconds=(
+                    FAST_SUMMARY_OCR_TIMEOUT_SECONDS if fast_mode else 8.0
+                ),
+            )
+        except Exception as exc:
+            logger.warning("导出摘要 OCR 失败: %s", exc)
+            ocr_text = ""
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        export_count = extract_export_summary_count_from_text(ocr_text)
+        if export_count is not None:
+            logger.info(
+                "左上角导出摘要命中: %s (variant=%s, text=%s)",
+                export_count,
+                variant_name,
+                normalize_ocr_text(ocr_text)[:120],
+            )
+            return export_count
+
+    return None
+
+
+def detect_export_image_count_from_image(
+    image: Image.Image | None,
+    cache_mode: bool = False,
+    explicit_only: bool = False,
+    dialog_mode: bool = False,
+    button_bounds: tuple[int, int, int, int] | None = None,
+) -> int | None:
+    """从导出页截图中自动识别导出张数。"""
+    if image is None:
+        logger.debug("检测导出张数：图像为None")
+        return None
+
+    width, height = image.size
+    logger.debug(f"检测导出张数：图像尺寸 {width}x{height}")
+    summary_export_count = detect_export_summary_count_from_image(
+        image, dialog_mode=dialog_mode, button_bounds=button_bounds
+    )
+    if summary_export_count is not None:
+        return summary_export_count
+
+    variants = _prepare_export_count_ocr_variants(
+        image,
+        cache_mode=cache_mode,
+        dialog_mode=dialog_mode,
+        button_bounds=button_bounds,
+    )
+    logger.debug(f"总共 {len(variants)} 个图像变体用于OCR")
+    fallback_candidates: dict[int, list[str]] = {}
+
+    for i, (variant_name, variant) in enumerate(variants):
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="export_count_", suffix=".png", delete=False
+            ) as handle:
+                temp_path = handle.name
+            variant.save(temp_path, format="PNG")
+            logger.debug(
+                "变体 %s(%s) 已保存到临时文件: %s", i + 1, variant_name, temp_path
+            )
+            ocr_text = run_windows_ocr(temp_path)
+            logger.debug(
+                f"变体 {i + 1}({variant_name}) OCR结果: '{ocr_text[:100]}...'"
+                if len(ocr_text) > 100
+                else f"变体 {i + 1}({variant_name}) OCR结果: '{ocr_text}'"
+            )
+        except Exception as exc:
+            logger.warning("导出张数 OCR 预处理失败: %s", exc)
+            ocr_text = ""
+        finally:
+            if "temp_path" in locals() and temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        explicit_export_count = extract_export_image_count_from_text(
+            ocr_text, allow_numeric_fallback=False
+        )
+        if explicit_export_count is not None:
+            logger.info(
+                "成功识别导出张数: %s (来自变体 %s:%s)",
+                explicit_export_count,
+                i + 1,
+                variant_name,
+            )
+            return explicit_export_count
+
+        if explicit_only:
+            logger.debug("变体 %s(%s) 未命中显式导出张数", i + 1, variant_name)
+            continue
+
+        fallback_export_count = extract_export_count_from_variant_text(
+            variant_name, ocr_text
+        )
+        if fallback_export_count is not None:
+            fallback_candidates.setdefault(fallback_export_count, []).append(variant_name)
+            logger.debug(
+                "记录导出张数候选: count=%s, variant=%s, hits=%s",
+                fallback_export_count,
+                variant_name,
+                len(fallback_candidates[fallback_export_count]),
+            )
+        else:
+            logger.debug("变体 %s(%s) 未识别到导出张数", i + 1, variant_name)
+
+    stable_candidates = [
+        (count, variant_names)
+        for count, variant_names in fallback_candidates.items()
+        if len(variant_names) >= 2
+    ]
+    if stable_candidates:
+        stable_candidates.sort(key=lambda item: (-len(item[1]), item[0]))
+        selected_count, selected_variants = stable_candidates[0]
+        logger.info(
+            "成功识别导出张数(多变体一致): %s (variants=%s)",
+            selected_count,
+            ",".join(selected_variants),
+        )
+        return selected_count
+
+    if explicit_only or cache_mode:
+        logger.debug("所有图像变体均未识别到导出张数")
+    else:
+        logger.warning("所有图像变体均未识别到导出张数")
+    return None
+
+
+def detect_export_image_count(main_hwnd: int | None) -> int | None:
+    """从像素蛋糕导出页自动识别导出张数。"""
+    image = capture_window_image(main_hwnd) if main_hwnd else None
+    return detect_export_image_count_from_image(image)
+
+
+def detect_export_page_context_from_image(image: Image.Image | None) -> bool:
+    """通过 OCR 判断当前截图是否真的是快速导出页。"""
+    if image is None:
+        return False
+
+    context_variants = [
+        item
+        for item in _prepare_export_count_ocr_variants(image, cache_mode=False)
+        if item[0].startswith(("summary_wide", "header_and_counts", "full"))
+    ]
+    for variant_name, variant in context_variants:
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="export_context_", suffix=".png", delete=False
+            ) as handle:
+                temp_path = handle.name
+            variant.save(temp_path, format="PNG")
+            ocr_text = run_windows_ocr(temp_path)
+        except Exception as exc:
+            logger.warning("导出页上下文 OCR 失败: %s", exc)
+            ocr_text = ""
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        if contains_export_page_context(ocr_text):
+            logger.info(
+                "导出页上下文命中: variant=%s, text=%s",
+                variant_name,
+                normalize_ocr_text(ocr_text)[:120],
+            )
+            return True
+
+    return False
+
+
+def detect_export_button_text_from_image(
+    image: Image.Image | None, button_bounds: tuple[int, int, int, int] | None
+) -> bool:
+    """通过 OCR 判断黄色按钮自身是否真的是“导出”。"""
+    if image is None or button_bounds is None:
+        return False
+
+    try:
+        crop = image.crop(button_bounds)
+    except Exception:
+        return False
+
+    button_variants = [
+        ("button-rgb6x", crop.resize((max(crop.width * 6, 1), max(crop.height * 6, 1)), RESAMPLING_LANCZOS)),
+    ]
+    gray = ImageOps.grayscale(button_variants[0][1])
+    gray = ImageEnhance.Contrast(ImageOps.autocontrast(gray)).enhance(2.5)
+    button_variants.append(("button-gray6x", gray))
+    button_variants.append(("button-inv6x", ImageOps.invert(gray)))
+
+    for variant_name, variant in button_variants:
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix="export_button_", suffix=".png", delete=False
+            ) as handle:
+                temp_path = handle.name
+            variant.save(temp_path, format="PNG")
+            ocr_text = run_windows_ocr(temp_path)
+        except Exception as exc:
+            logger.warning("导出按钮 OCR 失败: %s", exc)
+            ocr_text = ""
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+        if contains_export_button_text(ocr_text):
+            logger.info(
+                "导出按钮文字命中: variant=%s, text=%s",
+                variant_name,
+                normalize_ocr_text(ocr_text)[:60],
+            )
+            return True
+
+    return False
+
+
+def get_preferred_capture_hwnd(
+    root_pid: int | None,
+    fallback_hwnd: int | None,
+    preferred_hwnd: int | None = None,
+) -> int | None:
+    """优先返回当前前台的目标进程家族窗口，否则回退到主窗口或最大窗口。"""
+    if not HAS_WIN32:
+        return preferred_hwnd or fallback_hwnd
+
+    family_pids = get_process_family_pids(root_pid) if root_pid else set()
+    try:
+        foreground_hwnd = win32gui.GetForegroundWindow()
+    except Exception:
+        foreground_hwnd = None
+
+    if preferred_hwnd and win32gui.IsWindow(preferred_hwnd):
+        preferred_pid = get_window_pid(preferred_hwnd)
+        if not family_pids or preferred_pid in family_pids:
+            return preferred_hwnd
+
+    if foreground_hwnd and get_window_pid(foreground_hwnd) in family_pids:
+        return foreground_hwnd
+
+    if fallback_hwnd and win32gui.IsWindow(fallback_hwnd):
+        return fallback_hwnd
+
+    best_hwnd = None
+    best_area = -1
+    for hwnd in find_windows_by_pids(family_pids):
+        try:
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        except Exception:
+            continue
+        area = max(right - left, 0) * max(bottom - top, 0)
+        if area > best_area:
+            best_area = area
+            best_hwnd = hwnd
+
+    return best_hwnd or fallback_hwnd
+
+
+def is_process_family_foreground(root_pid: int | None, fallback_hwnd: int | None) -> bool:
+    """判断像素蛋糕当前是否位于前台。"""
+    if not HAS_WIN32:
+        return True
+    try:
+        foreground_hwnd = win32gui.GetForegroundWindow()
+    except Exception:
+        return False
+    family_pids = get_process_family_pids(root_pid) if root_pid else set()
+    if foreground_hwnd and get_window_pid(foreground_hwnd) in family_pids:
+        return True
+    if fallback_hwnd and foreground_hwnd == fallback_hwnd:
+        return True
+    return False
 
 
 def find_windows_by_pid(pid: int) -> list:
@@ -381,7 +1339,9 @@ def find_main_window(pid: int) -> int | None:
     return best_hwnd
 
 
-def check_export_dialog(pid: int, keywords: list[str], main_hwnd: int | None = None) -> int | None:
+def check_export_dialog(
+    pid: int, keywords: list[str], main_hwnd: int | None = None
+) -> int | None:
     """
     检查指定进程是否出现了包含导出关键词的窗口/对话框。
     返回匹配到的窗口句柄，未找到返回 None。
@@ -405,11 +1365,15 @@ def check_export_dialog(pid: int, keywords: list[str], main_hwnd: int | None = N
 
     if foreground_hwnd:
         foreground_pid = get_window_pid(foreground_hwnd)
-        if foreground_pid in family_pids and window_matches_keywords(foreground_hwnd, lowered_keywords):
+        if foreground_pid in family_pids and window_matches_keywords(
+            foreground_hwnd, lowered_keywords
+        ):
             return foreground_hwnd
 
     for hwnd in enumerate_visible_windows():
-        if hwnd in family_windows or not window_matches_keywords(hwnd, lowered_keywords):
+        if hwnd in family_windows or not window_matches_keywords(
+            hwnd, lowered_keywords
+        ):
             continue
 
         owner_hwnd = get_window_owner_hwnd(hwnd)
@@ -456,7 +1420,9 @@ def is_lock_target_window(hwnd: int) -> bool:
         class_name = get_window_class(hwnd).strip().lower()
         if title in LOCK_WINDOW_TITLE_EXCLUDES:
             return False
-        if any(keyword in class_name for keyword in LOCK_WINDOW_CLASS_KEYWORDS_EXCLUDES):
+        if any(
+            keyword in class_name for keyword in LOCK_WINDOW_CLASS_KEYWORDS_EXCLUDES
+        ):
             return False
         if "ime" in title and not title.endswith(".exe"):
             return False
@@ -472,7 +1438,9 @@ def is_lock_target_window(hwnd: int) -> bool:
         return False
 
 
-def recover_process_windows(process_name: str, hwnds: list[int] | None = None) -> list[int]:
+def recover_process_windows(
+    process_name: str, hwnds: list[int] | None = None
+) -> list[int]:
     """鍏ㄩ噺鎭㈠鐩爣杩涚▼鐩稿叧绐楀彛鐨勫彲浜や簰鐘舵€侊紝鐢ㄤ簬鍚姩鑷剤鍜岄€€鍑哄厹搴曘€?"""
     restored = []
     seen = set()
@@ -526,10 +1494,325 @@ class ProcessMonitor(QThread):
         self._startup_guard_logged = False
         self._suspended_pids = set()
         self._post_payment_pending = False
+        self._cached_export_count = None
+        self._cached_export_count_at = None
+        self._last_export_count_refresh_at = 0.0
+        self._last_export_capture_image = None
+        self._last_export_capture_at = None
+        self._last_export_capture_hwnd = None
+        self._last_export_capture_dialog_mode = False
+        self._last_left_button_down = False
+        self._export_page_context_active = False
+        self._export_page_context_checked_at = 0.0
+        self._export_page_context_hwnd = None
+        self._last_centered_dialog_scan_at = 0.0
+        self._last_summary_probe_at = 0.0
+        self._debug_export_capture_enabled = bool(
+            self._config.get("debug_export_capture", False)
+        )
+        self._centered_dialog_scan_enabled = bool(
+            self._config.get("centered_dialog_scan", False)
+        )
+        self._debug_export_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), EXPORT_DEBUG_DIRNAME
+        )
+        self._last_debug_export_dump_at = 0.0
+        self._debug_export_dump_seq = 0
+        self._last_debug_export_bundle = None
+        self._cleanup_debug_export_artifacts_if_disabled()
 
     def _reset_export_candidates(self):
         self._export_candidate_since = None
         self._export_clear_candidate_since = None
+
+    def _reset_export_count_cache(self):
+        self._cached_export_count = None
+        self._cached_export_count_at = None
+        self._last_export_count_refresh_at = 0.0
+        self._last_export_capture_image = None
+        self._last_export_capture_at = None
+        self._last_export_capture_hwnd = None
+        self._last_export_capture_dialog_mode = False
+        self._export_page_context_active = False
+        self._export_page_context_checked_at = 0.0
+        self._export_page_context_hwnd = None
+        self._last_centered_dialog_scan_at = 0.0
+        self._last_summary_probe_at = 0.0
+
+    def _remember_export_count(self, export_count: int | None, observed_at: float):
+        if export_count is None or export_count < 0:
+            return
+        self._cached_export_count = export_count
+        self._cached_export_count_at = observed_at
+
+    def _remember_export_capture(
+        self,
+        image: Image.Image | None,
+        observed_at: float,
+        capture_hwnd: int | None,
+        dialog_mode: bool,
+    ):
+        if image is None:
+            return
+        self._last_export_capture_image = image.copy()
+        self._last_export_capture_at = observed_at
+        self._last_export_capture_hwnd = capture_hwnd
+        self._last_export_capture_dialog_mode = dialog_mode
+
+    def _prune_export_debug_bundles(self):
+        if not os.path.isdir(self._debug_export_dir):
+            return
+
+        bundle_dirs = [
+            os.path.join(self._debug_export_dir, entry)
+            for entry in os.listdir(self._debug_export_dir)
+            if os.path.isdir(os.path.join(self._debug_export_dir, entry))
+        ]
+        bundle_dirs.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+        for stale_dir in bundle_dirs[EXPORT_DEBUG_MAX_BUNDLES:]:
+            try:
+                shutil.rmtree(stale_dir)
+            except OSError:
+                pass
+
+    def _cleanup_debug_export_artifacts_if_disabled(self):
+        """默认关闭调试时，顺手清掉历史调试包，避免现场目录越堆越乱。"""
+        if self._debug_export_capture_enabled or not os.path.isdir(self._debug_export_dir):
+            return
+
+        removed_any = False
+        for entry in os.listdir(self._debug_export_dir):
+            path = os.path.join(self._debug_export_dir, entry)
+            if not os.path.isdir(path):
+                continue
+            try:
+                shutil.rmtree(path)
+                removed_any = True
+            except OSError:
+                pass
+
+        try:
+            if not os.listdir(self._debug_export_dir):
+                os.rmdir(self._debug_export_dir)
+        except OSError:
+            pass
+
+        if removed_any:
+            logger.info("调试截图未开启，已清理旧的导出调试包")
+
+    def _dump_export_debug_bundle(
+        self,
+        now: float,
+        capture_hwnd: int | None,
+        main_image: Image.Image | None,
+        button_bounds: tuple[int, int, int, int] | None,
+        reason: str,
+    ) -> str | None:
+        """保存当前导出检测相关截图和 OCR 原文，便于现场排查。"""
+        if (
+            not self._debug_export_capture_enabled
+            or main_image is None
+            or (
+                self._last_debug_export_dump_at
+                and (now - self._last_debug_export_dump_at)
+                < CENTERED_DIALOG_DEBUG_DUMP_INTERVAL_SECONDS
+            )
+        ):
+            return None
+
+        self._last_debug_export_dump_at = now
+        self._debug_export_dump_seq += 1
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        safe_reason = re.sub(r"[^A-Za-z0-9_-]+", "_", reason or "probe").strip("_")
+        bundle_name = f"{timestamp}_{self._debug_export_dump_seq:03d}_{safe_reason or 'probe'}"
+        bundle_dir = os.path.join(self._debug_export_dir, bundle_name)
+        os.makedirs(bundle_dir, exist_ok=True)
+
+        meta = {
+            "reason": reason,
+            "capture_hwnd": capture_hwnd,
+            "button_bounds": list(button_bounds) if button_bounds else None,
+            "image_size": list(main_image.size),
+            "cached_export_count": self._cached_export_count,
+            "export_page_context_active": self._export_page_context_active,
+            "process_pid": self._current_pid,
+            "dumped_at": timestamp,
+        }
+
+        ocr_records: list[dict] = []
+
+        def save_image(name: str, image: Image.Image | None):
+            if image is None:
+                return
+            image.save(os.path.join(bundle_dir, name), format="PNG")
+
+        def add_ocr_record(name: str, image: Image.Image | None):
+            if image is None:
+                return
+            ocr_text = run_windows_ocr_on_image(image, prefix=f"debug_{name}")
+            ocr_records.append(
+                {
+                    "name": name,
+                    "normalized": normalize_ocr_text(ocr_text)[:300],
+                    "raw": ocr_text[:1200],
+                }
+            )
+
+        save_image("00_main.png", main_image)
+        add_ocr_record("00_main", main_image)
+
+        if button_bounds is not None:
+            try:
+                button_crop = main_image.crop(button_bounds)
+            except Exception:
+                button_crop = None
+            save_image("01_button.png", button_crop)
+            add_ocr_record("01_button", button_crop)
+
+            summary_anchor = _crop_summary_from_button_anchor(
+                main_image, button_bounds, widen=False
+            )
+            summary_anchor_wide = _crop_summary_from_button_anchor(
+                main_image, button_bounds, widen=True
+            )
+            save_image("02_summary_anchor.png", summary_anchor)
+            add_ocr_record("02_summary_anchor", summary_anchor)
+            save_image("03_summary_anchor_wide.png", summary_anchor_wide)
+            add_ocr_record("03_summary_anchor_wide", summary_anchor_wide)
+
+        summary_center = _crop_relative(main_image, (0.18, 0.12, 0.66, 0.30))
+        summary_wide_center = _crop_relative(main_image, (0.12, 0.06, 0.82, 0.34))
+        type_counts = _crop_relative(main_image, (0.02, 0.18, 0.78, 0.37))
+        save_image("04_summary_center.png", summary_center)
+        add_ocr_record("04_summary_center", summary_center)
+        save_image("05_summary_wide_center.png", summary_wide_center)
+        add_ocr_record("05_summary_wide_center", summary_wide_center)
+        save_image("06_type_counts.png", type_counts)
+        add_ocr_record("06_type_counts", type_counts)
+
+        for index, region in enumerate(CENTERED_DIALOG_SCAN_REGIONS, start=1):
+            cropped = _crop_relative(main_image, region)
+            save_image(f"10_centered_scan_{index}.png", cropped)
+            add_ocr_record(f"10_centered_scan_{index}", cropped)
+            if cropped is None:
+                continue
+            scaled = cropped.resize(
+                (max(cropped.width * 2, 1), max(cropped.height * 2, 1)),
+                RESAMPLING_LANCZOS,
+            )
+            gray = ImageOps.grayscale(scaled)
+            enhanced = ImageEnhance.Contrast(ImageOps.autocontrast(gray)).enhance(1.8)
+            enhanced = ImageEnhance.Sharpness(enhanced).enhance(2.2)
+            save_image(f"11_centered_scan_{index}_enhanced.png", enhanced)
+            add_ocr_record(f"11_centered_scan_{index}_enhanced", enhanced)
+
+        with open(os.path.join(bundle_dir, "meta.json"), "w", encoding="utf-8") as handle:
+            json.dump(meta, handle, ensure_ascii=False, indent=2)
+        with open(os.path.join(bundle_dir, "ocr_results.json"), "w", encoding="utf-8") as handle:
+            json.dump(ocr_records, handle, ensure_ascii=False, indent=2)
+
+        self._prune_export_debug_bundles()
+        self._last_debug_export_bundle = bundle_dir
+        logger.info("已保存导出调试包: %s", bundle_dir)
+        return bundle_dir
+
+    def _refresh_export_count_cache(
+        self,
+        now: float,
+        main_image: Image.Image | None = None,
+        dialog_mode: bool = False,
+        button_bounds: tuple[int, int, int, int] | None = None,
+    ) -> int | None:
+        if (
+            self._last_export_count_refresh_at
+            and (now - self._last_export_count_refresh_at)
+            < EXPORT_COUNT_REFRESH_INTERVAL_SECONDS
+        ):
+            return self._cached_export_count
+
+        self._last_export_count_refresh_at = now
+        if main_image is None:
+            main_image = self.capture_main_window_image()
+        export_count = detect_export_image_count_from_image(
+            main_image,
+            cache_mode=True,
+            explicit_only=True,
+            dialog_mode=dialog_mode,
+            button_bounds=button_bounds,
+        )
+        if export_count is not None:
+            logger.info("已缓存导出页张数: %s", export_count)
+            self._remember_export_count(export_count, now)
+        return export_count
+
+    def _probe_export_summary_count(
+        self,
+        now: float,
+        main_image: Image.Image | None,
+        dialog_mode: bool = False,
+        button_bounds: tuple[int, int, int, int] | None = None,
+    ) -> int | None:
+        """直接用摘要区做一次导出页预判，命中后立刻可用于触发收费。"""
+        if main_image is None or button_bounds is None:
+            return None
+        if (
+            self._last_summary_probe_at
+            and (now - self._last_summary_probe_at) < EXPORT_SUMMARY_PROBE_INTERVAL_SECONDS
+        ):
+            return None
+
+        self._last_summary_probe_at = now
+        export_count = detect_export_summary_count_from_image(
+            main_image,
+            dialog_mode=dialog_mode,
+            button_bounds=button_bounds,
+            fast_mode=True,
+        )
+        if export_count is not None:
+            logger.info("导出摘要预判命中: count=%s", export_count)
+            self._remember_export_count(export_count, now)
+        return export_count
+
+    def _confirm_export_detected(
+        self,
+        now: float,
+        main_image: Image.Image | None,
+        capture_hwnd: int | None,
+        export_hwnd: int | None,
+        export_pid: int | None,
+        pre_export_visual: bool,
+        dialog_mode: bool,
+    ):
+        """在监控线程内立刻确认导出，避免后续慢 OCR 再拖延触发。"""
+        self._remember_export_capture(
+            main_image,
+            now,
+            capture_hwnd,
+            dialog_mode=dialog_mode,
+        )
+        self._export_hwnd = export_hwnd
+        self._export_pid = export_pid
+        self._was_exporting = True
+        self._export_candidate_since = None
+        self._startup_guard_logged = False
+        if export_hwnd:
+            logger.info(
+                "确认导出窗口: hwnd=%s, pid=%s, title=%s, class=%s, export_worker_pid=%s",
+                export_hwnd,
+                get_window_pid(export_hwnd),
+                get_window_title(export_hwnd),
+                get_window_class(export_hwnd),
+                export_pid,
+            )
+        elif pre_export_visual:
+            logger.info(
+                "确认导出页预判: capture_hwnd=%s, cached_export_count=%s",
+                capture_hwnd,
+                self.get_recent_export_count(5.0),
+            )
+        else:
+            logger.info("确认导出子进程: export_worker_pid=%s", export_pid)
+        self.export_detected.emit()
 
     def _get_export_clear_debounce_seconds(self) -> float:
         """付款确认后延长一次导出结束判定，避免同一次导出的尾部痕迹被当成下一单。"""
@@ -537,11 +1820,147 @@ class ProcessMonitor(QThread):
             return POST_PAYMENT_EXPORT_CLEAR_DEBOUNCE_SECONDS
         return EXPORT_CLEAR_DEBOUNCE_SECONDS
 
+    def _refresh_export_page_context(
+        self,
+        now: float,
+        capture_hwnd: int | None,
+        main_image: Image.Image | None,
+        button_bounds: tuple[int, int, int, int] | None,
+    ) -> bool:
+        """节流刷新当前截图是否真的是导出页。"""
+        if main_image is None or not capture_hwnd or button_bounds is None:
+            self._export_page_context_active = False
+            self._export_page_context_checked_at = now
+            self._export_page_context_hwnd = capture_hwnd
+            return False
+
+        should_recheck = any(
+            [
+                self._export_page_context_hwnd != capture_hwnd,
+                not self._export_page_context_checked_at,
+                (now - self._export_page_context_checked_at)
+                >= EXPORT_COUNT_REFRESH_INTERVAL_SECONDS,
+            ]
+        )
+        if should_recheck:
+            self._export_page_context_active = all(
+                [
+                    detect_export_page_context_from_image(main_image),
+                    detect_export_button_text_from_image(main_image, button_bounds),
+                ]
+            )
+            self._export_page_context_checked_at = now
+            self._export_page_context_hwnd = capture_hwnd
+
+        return self._export_page_context_active
+
+    def _scan_for_centered_export_dialog(
+        self,
+        now: float,
+        main_image: Image.Image | None,
+    ) -> int | None:
+        """扫描主窗口中央区域，检测嵌入式导出对话框并提取张数。"""
+        if main_image is None:
+            return None
+        if (now - self._last_centered_dialog_scan_at) < CENTERED_DIALOG_SCAN_INTERVAL_SECONDS:
+            return None
+        self._last_centered_dialog_scan_at = now
+
+        width, height = main_image.size
+        if width < 500 or height < 350:
+            return None
+
+        for region in CENTERED_DIALOG_SCAN_REGIONS:
+            cropped = _crop_relative(main_image, region)
+            if cropped is None:
+                continue
+            scaled = cropped.resize(
+                (max(cropped.width * 2, 1), max(cropped.height * 2, 1)),
+                RESAMPLING_LANCZOS,
+            )
+            gray = ImageOps.grayscale(scaled)
+            enhanced = ImageEnhance.Contrast(ImageOps.autocontrast(gray)).enhance(1.8)
+            enhanced = ImageEnhance.Sharpness(enhanced).enhance(2.2)
+
+            for variant_img in [scaled, enhanced]:
+                temp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        prefix="dialog_scan_", suffix=".png", delete=False
+                    ) as handle:
+                        temp_path = handle.name
+                    variant_img.save(temp_path, format="PNG")
+                    ocr_text = run_windows_ocr(
+                        temp_path, timeout_seconds=FAST_SUMMARY_OCR_TIMEOUT_SECONDS
+                    )
+                except Exception as exc:
+                    logger.debug("居中对话框扫描 OCR 失败: %s", exc)
+                    ocr_text = ""
+                finally:
+                    if temp_path and os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+
+                export_count = extract_export_summary_count_from_text(ocr_text)
+                if export_count is not None:
+                    logger.info(
+                        "居中导出对话框扫描命中: count=%s, region=%s, text=%s",
+                        export_count,
+                        region,
+                        normalize_ocr_text(ocr_text)[:120],
+                    )
+                    return export_count
+
+        return None
+
+    def _consume_export_button_click(
+        self,
+        capture_hwnd: int | None,
+        button_bounds: tuple[int, int, int, int] | None,
+    ) -> bool:
+        """检测当前是否刚刚点击了黄色导出按钮。"""
+        if not HAS_WIN32 or not capture_hwnd or not button_bounds:
+            self._last_left_button_down = False
+            return False
+
+        try:
+            left_button_down = bool(win32api.GetAsyncKeyState(win32con.VK_LBUTTON) & 0x8000)
+            cursor_x, cursor_y = win32api.GetCursorPos()
+            left, top, _, _ = win32gui.GetWindowRect(capture_hwnd)
+        except Exception:
+            self._last_left_button_down = False
+            return False
+
+        button_left = left + button_bounds[0]
+        button_top = top + button_bounds[1]
+        button_right = left + button_bounds[2]
+        button_bottom = top + button_bounds[3]
+        inside_button = (
+            button_left <= cursor_x <= button_right
+            and button_top <= cursor_y <= button_bottom
+        )
+        is_new_click = left_button_down and not self._last_left_button_down and inside_button
+        self._last_left_button_down = left_button_down
+        if is_new_click:
+            logger.info(
+                "检测到导出按钮点击: capture_hwnd=%s, cursor=(%s,%s), bounds=%s",
+                capture_hwnd,
+                cursor_x,
+                cursor_y,
+                button_bounds,
+            )
+        return is_new_click
+
     def get_runtime_snapshot(self) -> dict:
         """返回监控线程当前关键状态，便于异常日志和现场排查。"""
         return {
             "current_pid": self._current_pid,
             "main_hwnd": self._main_hwnd,
+            "capture_hwnd": get_preferred_capture_hwnd(
+                self._current_pid, self._main_hwnd, self._export_hwnd
+            ),
             "export_hwnd": self._export_hwnd,
             "export_pid": self._export_pid,
             "is_process_running": self._was_running,
@@ -553,6 +1972,13 @@ class ProcessMonitor(QThread):
             "export_clear_candidate_since": self._export_clear_candidate_since,
             "suspended_pids": sorted(self._suspended_pids),
             "post_payment_pending": self._post_payment_pending,
+            "cached_export_count": self._cached_export_count,
+            "cached_export_count_at": self._cached_export_count_at,
+            "export_page_context_active": self._export_page_context_active,
+            "last_export_capture_hwnd": self._last_export_capture_hwnd,
+            "last_export_capture_dialog_mode": self._last_export_capture_dialog_mode,
+            "last_centered_dialog_scan_at": self._last_centered_dialog_scan_at,
+            "last_debug_export_bundle": self._last_debug_export_bundle,
         }
 
     def run(self):
@@ -574,6 +2000,7 @@ class ProcessMonitor(QThread):
                 self._startup_guard_logged = False
                 self._post_payment_pending = False
                 self._reset_export_candidates()
+                self._reset_export_count_cache()
                 logger.info(f"检测到目标程序启动: PID={pid}")
                 self.process_started.emit()
             elif is_running and self._current_pid != pid:
@@ -584,6 +2011,7 @@ class ProcessMonitor(QThread):
                 self._startup_guard_logged = False
                 self._post_payment_pending = False
                 self._reset_export_candidates()
+                self._reset_export_count_cache()
                 logger.info(f"检测到目标程序实例变化，切换到 PID={pid}")
             elif not is_running and self._was_running:
                 self._current_pid = None
@@ -596,6 +2024,7 @@ class ProcessMonitor(QThread):
                 self._startup_guard_logged = False
                 self._post_payment_pending = False
                 self._reset_export_candidates()
+                self._reset_export_count_cache()
                 self._suspended_pids = set()
                 logger.info("目标程序已退出")
                 self.process_stopped.emit()
@@ -606,11 +2035,134 @@ class ProcessMonitor(QThread):
             if is_running and self._current_pid:
                 self._main_hwnd = find_main_window(self._current_pid) or self._main_hwnd
                 worker_pids = find_export_worker_pids(self._current_pid)
-                new_worker_pids = get_new_export_worker_pids(worker_pids, self._known_export_worker_pids)
+                new_worker_pids = get_new_export_worker_pids(
+                    worker_pids, self._known_export_worker_pids
+                )
                 export_pid = min(new_worker_pids) if new_worker_pids else None
-                export_hwnd = check_export_dialog(self._current_pid, keywords, self._main_hwnd)
-                export_visual = detect_export_visual_state(self._main_hwnd)
-                has_export_evidence = bool(export_hwnd or export_pid or export_visual)
+                export_hwnd = check_export_dialog(
+                    self._current_pid, keywords, self._main_hwnd
+                )
+                capture_hwnd = get_preferred_capture_hwnd(
+                    self._current_pid, self._main_hwnd, export_hwnd
+                )
+                main_image = capture_window_image(capture_hwnd) if capture_hwnd else None
+                export_button_bounds = (
+                    locate_export_button_bounds(main_image) if main_image else None
+                )
+                export_visual_candidate = export_button_bounds is not None
+                dialog_mode = bool(export_hwnd and export_hwnd != self._main_hwnd)
+                summary_probe_count = None
+                if (
+                    export_visual_candidate
+                    and main_image is not None
+                    and not self._hold_export_state
+                    and not self._post_payment_pending
+                    and not self._was_exporting
+                ):
+                    summary_probe_count = self._probe_export_summary_count(
+                        now,
+                        main_image,
+                        dialog_mode=dialog_mode,
+                        button_bounds=export_button_bounds,
+                    )
+                export_page_context = False
+                if export_visual_candidate and summary_probe_count is None:
+                    export_page_context = self._refresh_export_page_context(
+                        now, capture_hwnd, main_image, export_button_bounds
+                    )
+                else:
+                    self._export_page_context_active = False
+                    self._export_page_context_hwnd = capture_hwnd
+                    self._export_page_context_checked_at = now
+                export_visual = export_visual_candidate and export_page_context
+                export_button_clicked = (
+                    self._consume_export_button_click(capture_hwnd, export_button_bounds)
+                    if export_visual
+                    else False
+                )
+                if not export_visual:
+                    self._last_left_button_down = False
+                should_refresh_export_count = all(
+                    [
+                        not self._hold_export_state,
+                        not self._post_payment_pending,
+                        not self._was_exporting,
+                        main_image is not None,
+                        (export_hwnd or export_visual_candidate),
+                        summary_probe_count is None,
+                    ]
+                )
+                if should_refresh_export_count:
+                    self._refresh_export_count_cache(
+                        now,
+                        main_image,
+                        dialog_mode=dialog_mode,
+                        button_bounds=export_button_bounds,
+                    )
+                has_cached_export_count = self.get_recent_export_count(5.0) is not None
+                pre_export_visual = (
+                    summary_probe_count is not None
+                    or export_visual
+                    or (
+                    export_visual_candidate and has_cached_export_count
+                    )
+                )
+                if (
+                    not self._was_exporting
+                    and not self._hold_export_state
+                    and not self._post_payment_pending
+                    and not is_within_guard_window(
+                        now, self._process_started_at, PROCESS_STARTUP_GUARD_SECONDS
+                    )
+                    and (
+                        export_hwnd is not None
+                        or export_pid is not None
+                        or summary_probe_count is not None
+                    )
+                ):
+                    self._export_clear_candidate_since = None
+                    self._confirm_export_detected(
+                        now,
+                        main_image,
+                        capture_hwnd,
+                        export_hwnd,
+                        export_pid,
+                        pre_export_visual,
+                        dialog_mode,
+                    )
+                    continue
+                has_export_evidence = bool(
+                    export_hwnd
+                    or export_pid
+                    or pre_export_visual
+                    or export_button_clicked
+                )
+                centered_dialog_count = None
+                if (
+                    not has_export_evidence
+                    and self._centered_dialog_scan_enabled
+                    and not self._was_exporting
+                    and not self._hold_export_state
+                    and not self._post_payment_pending
+                    and main_image is not None
+                ):
+                    self._dump_export_debug_bundle(
+                        now,
+                        capture_hwnd,
+                        main_image,
+                        export_button_bounds,
+                        reason="pre_export_probe",
+                    )
+                    centered_dialog_count = self._scan_for_centered_export_dialog(
+                        now, main_image
+                    )
+                    if centered_dialog_count is not None:
+                        self._remember_export_count(centered_dialog_count, now)
+                        self._remember_export_capture(
+                            main_image, now, capture_hwnd, dialog_mode=False
+                        )
+                        pre_export_visual = True
+                        has_export_evidence = True
                 startup_guard_active = is_within_guard_window(
                     now, self._process_started_at, PROCESS_STARTUP_GUARD_SECONDS
                 )
@@ -629,26 +2181,18 @@ class ProcessMonitor(QThread):
                             )
                             self._startup_guard_logged = True
                     else:
-                        if is_strong_export_signal(export_hwnd, export_pid, export_visual):
-                            self._export_hwnd = export_hwnd
-                            self._export_pid = export_pid
-                            self._was_exporting = True
-                            self._export_candidate_since = None
-                            self._startup_guard_logged = False
-                            if export_hwnd:
-                                logger.info(
-                                    "确认导出窗口: hwnd=%s, pid=%s, title=%s, class=%s, export_worker_pid=%s",
-                                    export_hwnd,
-                                    get_window_pid(export_hwnd),
-                                    get_window_title(export_hwnd),
-                                    get_window_class(export_hwnd),
-                                    export_pid,
-                                )
-                            elif export_visual:
-                                logger.info("确认快速导出页视觉特征: main_hwnd=%s", self._main_hwnd)
-                            else:
-                                logger.info("确认导出子进程: export_worker_pid=%s", export_pid)
-                            self.export_detected.emit()
+                        if is_strong_export_signal(
+                            export_hwnd, export_pid, pre_export_visual
+                        ):
+                            self._confirm_export_detected(
+                                now,
+                                main_image,
+                                capture_hwnd,
+                                export_hwnd,
+                                export_pid,
+                                pre_export_visual,
+                                dialog_mode,
+                            )
                         elif self._export_candidate_since is None:
                             self._export_candidate_since = now
                             logger.info(
@@ -659,27 +2203,19 @@ class ProcessMonitor(QThread):
                                 export_visual,
                             )
                         elif is_debounce_satisfied(
-                            self._export_candidate_since, now, EXPORT_VISUAL_DETECTION_DEBOUNCE_SECONDS
+                            self._export_candidate_since,
+                            now,
+                            EXPORT_VISUAL_DETECTION_DEBOUNCE_SECONDS,
                         ):
-                            self._export_hwnd = export_hwnd
-                            self._export_pid = export_pid
-                            self._was_exporting = True
-                            self._export_candidate_since = None
-                            self._startup_guard_logged = False
-                            if export_hwnd:
-                                logger.info(
-                                    "确认导出窗口: hwnd=%s, pid=%s, title=%s, class=%s, export_worker_pid=%s",
-                                    export_hwnd,
-                                    get_window_pid(export_hwnd),
-                                    get_window_title(export_hwnd),
-                                    get_window_class(export_hwnd),
-                                    export_pid,
-                                )
-                            elif export_visual:
-                                logger.info("确认导出界面视觉特征: main_hwnd=%s", self._main_hwnd)
-                            else:
-                                logger.info("确认导出子进程: export_worker_pid=%s", export_pid)
-                            self.export_detected.emit()
+                            self._confirm_export_detected(
+                                now,
+                                main_image,
+                                capture_hwnd,
+                                export_hwnd,
+                                export_pid,
+                                pre_export_visual,
+                                dialog_mode,
+                            )
                 elif not has_export_evidence and not self._was_exporting:
                     self._export_candidate_since = None
                     self._startup_guard_logged = False
@@ -731,6 +2267,89 @@ class ProcessMonitor(QThread):
         if self._post_payment_pending != active:
             self._export_clear_candidate_since = None
         self._post_payment_pending = active
+
+    def get_recent_export_count(
+        self, max_age_seconds: float = EXPORT_COUNT_CACHE_TTL_SECONDS
+    ) -> int | None:
+        """获取最近一次在导出页识别到的导出张数。"""
+        if self._cached_export_count is None or self._cached_export_count_at is None:
+            return None
+        if (time.monotonic() - self._cached_export_count_at) > max(max_age_seconds, 0.0):
+            return None
+        return self._cached_export_count
+
+    def get_last_export_capture_image(
+        self, max_age_seconds: float = 5.0
+    ) -> Image.Image | None:
+        """获取最近一次触发导出前保存下来的那一帧截图。"""
+        if (
+            self._last_export_capture_image is None
+            or self._last_export_capture_at is None
+            or (time.monotonic() - self._last_export_capture_at)
+            > max(max_age_seconds, 0.0)
+        ):
+            return None
+        return self._last_export_capture_image.copy()
+
+    def get_last_export_capture_dialog_mode(
+        self, max_age_seconds: float = 5.0
+    ) -> bool:
+        """最近一次导出前截图是否来自导出对话框。"""
+        if (
+            self._last_export_capture_at is None
+            or (time.monotonic() - self._last_export_capture_at)
+            > max(max_age_seconds, 0.0)
+        ):
+            return False
+        return self._last_export_capture_dialog_mode
+
+    def _current_dialog_mode(self) -> bool:
+        return bool(self._export_hwnd and self._export_hwnd != self._main_hwnd)
+
+    def capture_main_window_image(self) -> Image.Image | None:
+        """抓取当前像素蛋糕主窗口截图，用于后续离线 OCR。"""
+        if self._suspended_pids:
+            return self.get_last_export_capture_image(max_age_seconds=30.0)
+        capture_hwnd = get_preferred_capture_hwnd(
+            self._current_pid, self._main_hwnd, self._export_hwnd
+        )
+        if not capture_hwnd:
+            return None
+        return capture_window_image(capture_hwnd)
+
+    def detect_export_summary_count_from_image(
+        self, image: Image.Image | None, dialog_mode: bool | None = None
+    ) -> int | None:
+        """优先读取左上角摘要区里的导出张数。"""
+        if dialog_mode is None:
+            dialog_mode = self._current_dialog_mode()
+        return detect_export_summary_count_from_image(
+            image, dialog_mode=dialog_mode
+        )
+
+    def detect_export_summary_count(self) -> int | None:
+        """读取当前导出页左上角摘要中的导出张数。"""
+        return detect_export_summary_count_from_image(
+            self.capture_main_window_image(),
+            dialog_mode=self._current_dialog_mode(),
+        )
+
+    def detect_export_image_count_from_image(
+        self, image: Image.Image | None, dialog_mode: bool | None = None
+    ) -> int | None:
+        """从给定截图中识别导出张数。"""
+        if dialog_mode is None:
+            dialog_mode = self._current_dialog_mode()
+        return detect_export_image_count_from_image(
+            image, dialog_mode=dialog_mode
+        )
+
+    def detect_export_image_count(self) -> int | None:
+        """读取当前导出页中的导出张数。"""
+        return detect_export_image_count_from_image(
+            self.capture_main_window_image(),
+            dialog_mode=self._current_dialog_mode(),
+        )
 
     def suspend_target_processes(self) -> list[int]:
         """挂起像素蛋糕主进程及其子进程，阻止导出在付款前继续执行。"""

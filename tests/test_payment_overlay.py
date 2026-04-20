@@ -82,6 +82,10 @@ class TestPaymentOverlay(unittest.TestCase):
         self.assertIn("0", self.overlay.duration_label.text())
         self.assertIn("计时单价", self.overlay.rate_label.text())
         self.assertIn("1.00", self.overlay.rate_label.text())
+        self.assertIn("导出张数", self.overlay.export_count_label.text())
+        self.assertIn("0", self.overlay.export_count_label.text())
+        self.assertIn("单张导出单价", self.overlay.export_rate_label.text())
+        self.assertIn("0.00", self.overlay.export_rate_label.text())
         self.assertIn("合计金额", self.overlay.amount_label.text())
         self.assertIn("0.00", self.overlay.amount_label.text())
 
@@ -96,14 +100,28 @@ class TestPaymentOverlay(unittest.TestCase):
     def test_update_display(self):
         """测试信息更新"""
         # 更新时长和费率
-        self.overlay.update_display(duration_minutes=5, rate=2.0)
+        self.overlay.update_display(duration_minutes=5, rate=2.0, export_count=3, export_rate=4.0)
 
         # 检查更新后的文本
         self.assertIn("5", self.overlay.duration_label.text())
         self.assertIn("2.00", self.overlay.rate_label.text())
-        self.assertIn("10.00", self.overlay.amount_label.text())
+        self.assertIn("3", self.overlay.export_count_label.text())
+        self.assertIn("4.00", self.overlay.export_rate_label.text())
+        self.assertIn("10.00", self.overlay.time_amount_label.text())
+        self.assertIn("12.00", self.overlay.export_amount_label.text())
+        self.assertIn("22.00", self.overlay.amount_label.text())
 
         print("✓ 信息更新测试通过")
+
+    def test_calculate_payment_details(self):
+        """测试复合计费计算。"""
+        from payment_overlay import calculate_payment_details
+
+        details = calculate_payment_details(6, 2.5, export_count=4, export_rate=3.0)
+
+        self.assertEqual(details["time_total"], 15.0)
+        self.assertEqual(details["export_total"], 12.0)
+        self.assertEqual(details["total"], 27.0)
 
     def test_payment_button(self):
         """测试支付按钮"""

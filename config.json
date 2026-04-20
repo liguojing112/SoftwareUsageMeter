@@ -1,5 +1,7 @@
 {
   "rate": 1.0,
+  "export_rate": 1.0,
+  "default_export_count": 1,
   "admin_password": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
   "qr_code_path": "C:/学习/李国敬毕业设计/收款码.jpg",
   "process_name": "PixCake.exe",

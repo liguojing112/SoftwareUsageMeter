@@ -6,6 +6,7 @@
 import os
 import sys
 import time
+import tempfile
 import subprocess
 import unittest
 from unittest import mock
@@ -252,6 +253,91 @@ class TestProcessMonitor(unittest.TestCase):
         self.assertTrue(is_strong_export_signal(None, None, True))
         self.assertFalse(is_strong_export_signal(None, None))
 
+    def test_extract_export_image_count_from_text(self):
+        """OCR 文本中应能提取导出张数。"""
+        from process_monitor import (
+            contains_export_page_context,
+            contains_export_button_text,
+            extract_export_count_from_variant_text,
+            extract_export_image_count_from_text,
+            extract_export_summary_count_from_text,
+            normalize_ocr_text,
+        )
+
+        self.assertEqual(
+            extract_export_image_count_from_text("快 速 导 出\n导 出 12 张 图 片"),
+            12,
+        )
+        self.assertEqual(
+            extract_export_image_count_from_text("精 修 效 果 图 （ 2 ） 免费 效 果 图 （ 1 ） 原 图 （ 0 ）"),
+            3,
+        )
+        self.assertTrue(contains_export_page_context("快速导出 导出至 指定文件夹"))
+        self.assertTrue(contains_export_button_text("导 出"))
+        self.assertFalse(contains_export_button_text("导 入"))
+        self.assertEqual(extract_export_image_count_from_text("快速导出 2"), 2)
+        self.assertEqual(
+            extract_export_summary_count_from_text("导出2张图片，其中1张是未编辑图片"),
+            2,
+        )
+        self.assertEqual(
+            extract_export_summary_count_from_text("2图片效图2效图0原图0"),
+            2,
+        )
+        self.assertEqual(
+            extract_export_summary_count_from_text("H2图片效图2效图0"),
+            2,
+        )
+        self.assertEqual(
+            extract_export_summary_count_from_text("2ͼƬЧͼ2Чͼ0ԭͼ0"),
+            2,
+        )
+        self.assertEqual(
+            extract_export_summary_count_from_text("H2ͼƬЧͼ2Чͼ0"),
+            2,
+        )
+        self.assertIsNone(extract_export_summary_count_from_text("2选图前图"))
+        self.assertIsNone(
+            extract_export_summary_count_from_text("2选图原图01模支图片原始前图图22原图3图0")
+        )
+        self.assertIsNone(
+            extract_export_summary_count_from_text("2ѡͼԭͼ01ģ֧ͼƬԭʼǰͼͼ22ԭͼ3ͼ0")
+        )
+        self.assertEqual(
+            normalize_ocr_text("2ѡͼԭͼ01ģ֧ͼƬԭʼǰͼͼ22ԭͼ3ͼȡФ"),
+            "2选图原图01模支图片原始当前图22原图3图取消",
+        )
+        self.assertFalse(
+            contains_export_page_context("2ѡͼԭͼ01ģ֧ͼƬԭʼǰͼͼ22ԭͼ3ͼȡФ")
+        )
+        self.assertIsNone(extract_export_image_count_from_text("42"))
+        self.assertEqual(
+            extract_export_count_from_variant_text("summary-rgb2x", "µј іц 2 ХЕ Нј Ж¬"),
+            2,
+        )
+        self.assertIsNone(
+            extract_export_count_from_variant_text(
+                "summary-rgb2x", "O0一00user100027042026/4/201832牛"
+            )
+        )
+        self.assertIsNone(
+            extract_export_count_from_variant_text(
+                "summary_wide-rgb2x", "0|077抓Free液Free图FreeFree图New一预O效"
+            )
+        )
+        self.assertEqual(
+            extract_export_count_from_variant_text(
+                "type_counts-rgb2x", "精修效果图(1) 免费效果图(1) 原图(0)"
+            ),
+            2,
+        )
+        self.assertIsNone(
+            extract_export_count_from_variant_text(
+                "type_counts-rgb2x", "1图片1未图片"
+            )
+        )
+        self.assertIsNone(extract_export_image_count_from_text("未检测到导出数量"))
+
     def test_window_matches_keywords_only_uses_title(self):
         """Qt SaveBits 这类类名命中不应再被误判为导出窗口。"""
         from process_monitor import window_matches_keywords
@@ -259,6 +345,15 @@ class TestProcessMonitor(unittest.TestCase):
         with mock.patch("process_monitor.get_window_title", return_value=""), \
              mock.patch("process_monitor.get_window_class", return_value="Qt5152QWindowToolTipSaveBits"):
             self.assertFalse(window_matches_keywords(12345, ["save"]))
+
+    def test_window_matches_keywords_ignores_delete_progress_confirmation(self):
+        """删除导出进度确认框不应再被识别成收费触发窗口。"""
+        from process_monitor import window_matches_keywords
+
+        with mock.patch(
+            "process_monitor.get_window_title", return_value="确认删除该导出进度"
+        ):
+            self.assertFalse(window_matches_keywords(12345, ["导出", "export"]))
 
     def test_check_export_dialog_ignores_non_family_keyword_window(self):
         """文件资源管理器等非目标进程家族窗口即使标题带导出，也不应被当成导出框。"""
@@ -291,6 +386,106 @@ class TestProcessMonitor(unittest.TestCase):
         with mock.patch("process_monitor.psutil.Process", side_effect=lambda pid: FakeProcess(pid)):
             self.assertEqual(suspend_processes({3, 1, 2}), [3, 2, 1])
             self.assertEqual(resume_processes({3, 1, 2}), [1, 2, 3])
+
+    def test_monitor_consumes_export_button_click_inside_bounds(self):
+        """只有点击黄色导出按钮区域时，才应视为导出操作。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        button_bounds = (600, 500, 760, 580)
+
+        with mock.patch("process_monitor.HAS_WIN32", True), \
+             mock.patch("process_monitor.win32api.GetAsyncKeyState", return_value=0x8000), \
+             mock.patch("process_monitor.win32api.GetCursorPos", return_value=(750, 650)), \
+             mock.patch("process_monitor.win32gui.GetWindowRect", return_value=(100, 100, 1100, 900)):
+            self.assertTrue(monitor._consume_export_button_click(200, button_bounds))
+
+        with mock.patch("process_monitor.HAS_WIN32", True), \
+             mock.patch("process_monitor.win32api.GetAsyncKeyState", return_value=0x8000), \
+             mock.patch("process_monitor.win32api.GetCursorPos", return_value=(300, 300)), \
+             mock.patch("process_monitor.win32gui.GetWindowRect", return_value=(100, 100, 1100, 900)):
+            self.assertFalse(monitor._consume_export_button_click(200, button_bounds))
+
+    def test_get_preferred_capture_hwnd_prefers_foreground_family_window(self):
+        """截图应优先抓取当前前台的像素蛋糕进程家族窗口。"""
+        from process_monitor import get_preferred_capture_hwnd
+
+        with mock.patch("process_monitor.HAS_WIN32", True), \
+             mock.patch("process_monitor.get_process_family_pids", return_value={100, 101}), \
+             mock.patch("process_monitor.win32gui.GetForegroundWindow", return_value=300), \
+             mock.patch("process_monitor.get_window_pid", side_effect=lambda hwnd: {300: 101}.get(hwnd)), \
+             mock.patch("process_monitor.win32gui.IsWindow", return_value=True):
+            self.assertEqual(get_preferred_capture_hwnd(100, 200), 300)
+
+    def test_get_preferred_capture_hwnd_prefers_export_dialog(self):
+        """导出对话框存在时，应优先抓取导出对话框而不是主窗口。"""
+        from process_monitor import get_preferred_capture_hwnd
+
+        with mock.patch("process_monitor.HAS_WIN32", True), \
+             mock.patch("process_monitor.get_process_family_pids", return_value={100}), \
+             mock.patch("process_monitor.win32gui.GetForegroundWindow", return_value=0), \
+             mock.patch("process_monitor.win32gui.IsWindow", side_effect=lambda hwnd: hwnd == 400), \
+             mock.patch("process_monitor.get_window_pid", return_value=100):
+            self.assertEqual(get_preferred_capture_hwnd(100, 200, 400), 400)
+
+    def test_capture_window_image_prefers_printwindow(self):
+        """只要 PrintWindow 能抓到窗口内容，就不应再依赖屏幕截图。"""
+        from process_monitor import capture_window_image
+
+        fake_image = Image.new("RGB", (960, 808), (45, 47, 52))
+        with mock.patch("process_monitor.HAS_WIN32", True), \
+             mock.patch("process_monitor.win32gui.IsWindow", return_value=True), \
+             mock.patch("process_monitor.win32gui.GetWindowRect", return_value=(0, 0, 960, 808)), \
+             mock.patch("process_monitor._capture_window_image_printwindow", return_value=fake_image), \
+             mock.patch("process_monitor.ImageGrab.grab") as mock_grab:
+            captured = capture_window_image(12345)
+
+        self.assertIs(captured, fake_image)
+        mock_grab.assert_not_called()
+
+    def test_capture_window_image_falls_back_to_imagegrab(self):
+        """PrintWindow 失败时，仍应回退到原来的屏幕截图路径。"""
+        from process_monitor import capture_window_image
+
+        fake_image = Image.new("RGB", (960, 808), (45, 47, 52))
+        with mock.patch("process_monitor.HAS_WIN32", True), \
+             mock.patch("process_monitor.HAS_IMAGE_GRAB", True), \
+             mock.patch("process_monitor.win32gui.IsWindow", return_value=True), \
+             mock.patch("process_monitor.win32gui.GetWindowRect", return_value=(0, 0, 960, 808)), \
+             mock.patch("process_monitor._capture_window_image_printwindow", return_value=None), \
+             mock.patch("process_monitor.ImageGrab.grab", return_value=fake_image) as mock_grab:
+            captured = capture_window_image(12345)
+
+        self.assertIs(captured, fake_image)
+        mock_grab.assert_called_once()
+
+    def test_prepare_export_variants_include_centered_summary_regions(self):
+        """普通导出页不是全屏时，也应准备居中小面板的摘要裁剪区域。"""
+        from process_monitor import _prepare_export_count_ocr_variants
+
+        fake_image = Image.new("RGB", (1200, 800), (45, 47, 52))
+        labels = [label for label, _ in _prepare_export_count_ocr_variants(fake_image)]
+
+        self.assertIn("summary_popup_title-rgb2x", labels)
+        self.assertIn("summary_popup_title_wide-rgb2x", labels)
+        self.assertIn("summary_center-rgb2x", labels)
+        self.assertIn("summary_wide_center-rgb2x", labels)
+
+    def test_prepare_export_variants_include_button_anchored_summary_regions(self):
+        """识别到黄色导出按钮后，应额外生成按钮锚定的摘要裁剪区域。"""
+        from process_monitor import _prepare_export_count_ocr_variants
+
+        fake_image = Image.new("RGB", (1200, 800), (45, 47, 52))
+        labels = [
+            label
+            for label, _ in _prepare_export_count_ocr_variants(
+                fake_image, button_bounds=(820, 690, 980, 760)
+            )
+        ]
+
+        self.assertIn("summary_anchor-rgb2x", labels)
+        self.assertIn("summary_anchor_wide-rgb2x", labels)
 
 
 class TestProcessMonitorThread(unittest.TestCase):
@@ -346,6 +541,415 @@ class TestProcessMonitorThread(unittest.TestCase):
 
         monitor.set_post_payment_pending(False)
         self.assertEqual(monitor._get_export_clear_debounce_seconds(), EXPORT_CLEAR_DEBOUNCE_SECONDS)
+
+    def test_recent_export_count_cache(self):
+        """导出页缓存张数应在有效期内可复用。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        monitor._remember_export_count(6, observed_at=100.0)
+
+        with mock.patch("process_monitor.time.monotonic", return_value=105.0):
+            self.assertEqual(monitor.get_recent_export_count(max_age_seconds=10.0), 6)
+
+        with mock.patch("process_monitor.time.monotonic", return_value=140.0):
+            self.assertIsNone(monitor.get_recent_export_count(max_age_seconds=10.0))
+
+    def test_refresh_export_count_cache_uses_cache_mode_ocr(self):
+        """导出页预缓存应走轻量 OCR，并在命中后写入缓存。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        monitor._debug_export_capture_enabled = True
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+
+        with mock.patch(
+            "process_monitor.detect_export_image_count_from_image", return_value=2
+        ) as mock_detect:
+            detected = monitor._refresh_export_count_cache(10.0, fake_image)
+
+        self.assertEqual(detected, 2)
+        mock_detect.assert_called_once_with(
+            fake_image,
+            cache_mode=True,
+            explicit_only=True,
+            dialog_mode=False,
+            button_bounds=None,
+        )
+        self.assertEqual(monitor._cached_export_count, 2)
+        self.assertEqual(monitor._cached_export_count_at, 10.0)
+
+    def test_refresh_export_count_cache_supports_dialog_mode(self):
+        """本地导出对话框预缓存时，应切到对话框版裁剪区域。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        monitor._debug_export_capture_enabled = True
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+
+        with mock.patch(
+            "process_monitor.detect_export_image_count_from_image", return_value=1
+        ) as mock_detect:
+            detected = monitor._refresh_export_count_cache(
+                10.0, fake_image, dialog_mode=True
+            )
+
+        self.assertEqual(detected, 1)
+        mock_detect.assert_called_once_with(
+            fake_image,
+            cache_mode=True,
+            explicit_only=True,
+            dialog_mode=True,
+            button_bounds=None,
+        )
+
+    def test_refresh_export_page_context_requires_export_button_text(self):
+        """即使页面 OCR 命中，上下文也必须配合“导出”按钮文字才算导出页。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        monitor._debug_export_capture_enabled = True
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+
+        with mock.patch(
+            "process_monitor.detect_export_page_context_from_image", return_value=True
+        ), mock.patch(
+            "process_monitor.detect_export_button_text_from_image", return_value=False
+        ):
+            self.assertFalse(
+                monitor._refresh_export_page_context(
+                    10.0, 12345, fake_image, (700, 700, 900, 780)
+                )
+            )
+
+    def test_dump_export_debug_bundle_saves_artifacts(self):
+        """导出调试包应落盘主截图、OCR 结果和元数据，方便现场排查。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        monitor._debug_export_capture_enabled = True
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            monitor._debug_export_dir = temp_dir
+            with mock.patch(
+                "process_monitor.run_windows_ocr_on_image",
+                side_effect=lambda *args, **kwargs: "导出2张图片",
+            ):
+                bundle_dir = monitor._dump_export_debug_bundle(
+                    10.0,
+                    12345,
+                    fake_image,
+                    (700, 650, 860, 730),
+                    "unit_test",
+                )
+
+            self.assertIsNotNone(bundle_dir)
+            self.assertTrue(os.path.isdir(bundle_dir))
+            self.assertTrue(os.path.exists(os.path.join(bundle_dir, "00_main.png")))
+            self.assertTrue(os.path.exists(os.path.join(bundle_dir, "meta.json")))
+            self.assertTrue(os.path.exists(os.path.join(bundle_dir, "ocr_results.json")))
+
+    def test_dump_export_debug_bundle_is_throttled(self):
+        """导出调试包应节流，避免监控循环频繁写满磁盘。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        monitor._debug_export_capture_enabled = True
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            monitor._debug_export_dir = temp_dir
+            with mock.patch(
+                "process_monitor.run_windows_ocr_on_image",
+                return_value="导出1张图片",
+            ):
+                first_bundle = monitor._dump_export_debug_bundle(
+                    10.0,
+                    12345,
+                    fake_image,
+                    None,
+                    "throttle_probe",
+                )
+                second_bundle = monitor._dump_export_debug_bundle(
+                    12.0,
+                    12345,
+                    fake_image,
+                    None,
+                    "throttle_probe",
+                )
+
+        self.assertIsNotNone(first_bundle)
+        self.assertIsNone(second_bundle)
+
+    def test_cleanup_debug_export_artifacts_when_disabled(self):
+        """默认关闭调试时，应清理残留的导出调试包目录。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_bundle = os.path.join(temp_dir, "20260421_000000_001_pre_export_probe")
+            os.makedirs(old_bundle, exist_ok=True)
+            with open(os.path.join(old_bundle, "00_main.png"), "wb") as handle:
+                handle.write(b"debug")
+
+            monitor._debug_export_capture_enabled = False
+            monitor._debug_export_dir = temp_dir
+            monitor._cleanup_debug_export_artifacts_if_disabled()
+
+            self.assertFalse(os.path.exists(old_bundle))
+
+    def test_probe_export_summary_count_remembers_count(self):
+        """摘要预判命中后，应立刻写入最近导出张数缓存。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        monitor._debug_export_capture_enabled = True
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+
+        with mock.patch(
+            "process_monitor.detect_export_summary_count_from_image", return_value=2
+        ):
+            detected = monitor._probe_export_summary_count(
+                10.0,
+                fake_image,
+                dialog_mode=False,
+                button_bounds=(700, 650, 860, 730),
+            )
+
+        self.assertEqual(detected, 2)
+        self.assertEqual(monitor._cached_export_count, 2)
+        self.assertEqual(monitor._cached_export_count_at, 10.0)
+
+    def test_monitor_confirms_immediately_when_summary_probe_hits(self):
+        """摘要快速命中后，应直接确认导出，不再等待后续慢 OCR。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+        signal_hits = []
+        monitor.export_detected.connect(lambda: signal_hits.append("hit"))
+
+        with mock.patch.object(monitor, "_remember_export_capture") as mock_capture:
+            monitor._confirm_export_detected(
+                10.0,
+                fake_image,
+                12345,
+                None,
+                None,
+                True,
+                False,
+            )
+
+        mock_capture.assert_called_once()
+        self.assertTrue(monitor._was_exporting)
+        self.assertEqual(signal_hits, ["hit"])
+
+    def test_probe_export_summary_count_is_throttled(self):
+        """摘要预判应节流，避免每轮监控都重复 OCR。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+
+        with mock.patch(
+            "process_monitor.detect_export_summary_count_from_image", return_value=2
+        ) as mock_detect:
+            first = monitor._probe_export_summary_count(
+                10.0,
+                fake_image,
+                dialog_mode=False,
+                button_bounds=(700, 650, 860, 730),
+            )
+            second = monitor._probe_export_summary_count(
+                10.2,
+                fake_image,
+                dialog_mode=False,
+                button_bounds=(700, 650, 860, 730),
+            )
+
+        self.assertEqual(first, 2)
+        self.assertIsNone(second)
+        self.assertEqual(mock_detect.call_count, 1)
+
+    def test_detect_export_image_count_requires_multi_variant_consensus_for_fallback(self):
+        """单个宽区域脏读数字不应直接被当成导出张数。"""
+        from process_monitor import detect_export_image_count_from_image
+
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+        fake_variants = [
+            ("summary-rgb2x", fake_image),
+            ("summary-gray2x", fake_image),
+            ("summary_wide-rgb2x", fake_image),
+        ]
+        ocr_side_effect = [
+            "3图片",
+            "3张图片",
+            "0|077抓Free液Free图FreeFree图New一预O效",
+        ]
+
+        with mock.patch(
+            "process_monitor._prepare_export_count_ocr_variants",
+            return_value=fake_variants,
+        ), mock.patch(
+            "process_monitor.run_windows_ocr", side_effect=ocr_side_effect
+        ):
+            self.assertEqual(detect_export_image_count_from_image(fake_image), 3)
+
+    def test_detect_export_image_count_dialog_mode_omits_type_counts_noise(self):
+        """本地导出对话框识别时，不应再吃到下方路径/表单区域的噪声。"""
+        from process_monitor import detect_export_image_count_from_image
+
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+        fake_variants = [
+            ("summary-rgb2x", fake_image),
+            ("summary-gray2x", fake_image),
+        ]
+        ocr_side_effect = [
+            "导出 2 张图片，其中 1 张是未编辑图片",
+            "导出 2 张图片",
+        ]
+
+        with mock.patch(
+            "process_monitor._prepare_export_count_ocr_variants",
+            return_value=fake_variants,
+        ), mock.patch(
+            "process_monitor.run_windows_ocr", side_effect=ocr_side_effect
+        ):
+            self.assertEqual(
+                detect_export_image_count_from_image(fake_image, dialog_mode=True), 2
+            )
+
+    def test_detect_export_summary_count_from_image_prefers_left_top_summary(self):
+        """只要左上角摘要能读到张数，就应直接采用它。"""
+        from process_monitor import detect_export_summary_count_from_image
+
+        fake_image = Image.new("RGB", (960, 800), (45, 47, 52))
+        fake_variants = [
+            ("summary-rgb2x", fake_image),
+            ("summary-gray2x", fake_image),
+        ]
+        ocr_side_effect = [
+            "导出2张图片，其中1张是未编辑图片",
+            "导出2张图片",
+        ]
+
+        with mock.patch(
+            "process_monitor._prepare_export_count_ocr_variants",
+            return_value=fake_variants,
+        ), mock.patch(
+            "process_monitor.run_windows_ocr", side_effect=ocr_side_effect
+        ):
+            self.assertEqual(detect_export_summary_count_from_image(fake_image), 2)
+
+    def test_detect_export_summary_count_from_image_uses_button_anchor(self):
+        """普通导出页不是全屏时，应能借助按钮位置反推出摘要区。"""
+        from process_monitor import detect_export_summary_count_from_image
+
+        fake_image = Image.new("RGB", (1200, 800), (45, 47, 52))
+        fake_variants = [
+            ("summary_anchor-rgb2x", fake_image),
+            ("summary-rgb2x", fake_image),
+        ]
+        ocr_side_effect = [
+            "导出2张图片",
+            "",
+        ]
+
+        with mock.patch(
+            "process_monitor._prepare_export_count_ocr_variants",
+            return_value=fake_variants,
+        ), mock.patch(
+            "process_monitor.run_windows_ocr", side_effect=ocr_side_effect
+        ):
+            self.assertEqual(
+                detect_export_summary_count_from_image(
+                    fake_image, button_bounds=(820, 690, 980, 760)
+                ),
+                2,
+            )
+
+    def test_detect_export_summary_count_from_image_fast_mode_prefers_anchor_variants(self):
+        """快速预判应优先尝试按钮锚定摘要区，并使用短超时。"""
+        from process_monitor import detect_export_summary_count_from_image
+
+        fake_image = Image.new("RGB", (1200, 800), (45, 47, 52))
+        fake_variants = [
+            ("summary-gray2x", fake_image),
+            ("summary_anchor_wide-rgb2x", fake_image),
+            ("summary_anchor-rgb2x", fake_image),
+            ("summary_popup_title-rgb2x", fake_image),
+            ("summary_popup_title_wide-rgb2x", fake_image),
+        ]
+
+        with mock.patch(
+            "process_monitor._prepare_export_count_ocr_variants",
+            return_value=fake_variants,
+        ), mock.patch(
+            "process_monitor.run_windows_ocr",
+            side_effect=["导出2张图片"],
+        ) as mock_ocr:
+            self.assertEqual(
+                detect_export_summary_count_from_image(
+                    fake_image,
+                    button_bounds=(820, 690, 980, 760),
+                    fast_mode=True,
+                ),
+                2,
+            )
+
+        self.assertEqual(mock_ocr.call_count, 1)
+        self.assertEqual(mock_ocr.call_args.kwargs.get("timeout_seconds"), 0.9)
+
+    def test_monitor_reuses_last_export_capture_image(self):
+        """导出触发瞬间的截图应该能被主流程复用。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        fake_image = Image.new("RGB", (320, 200), (45, 47, 52))
+        monitor._remember_export_capture(fake_image, 10.0, 23456, dialog_mode=True)
+
+        with mock.patch("process_monitor.time.monotonic", return_value=12.0):
+            cached_image = monitor.get_last_export_capture_image()
+            self.assertIsNotNone(cached_image)
+            self.assertEqual(cached_image.size, fake_image.size)
+            self.assertTrue(monitor.get_last_export_capture_dialog_mode())
+
+        with mock.patch("process_monitor.time.monotonic", return_value=20.5):
+            self.assertIsNone(monitor.get_last_export_capture_image(max_age_seconds=5.0))
+            self.assertFalse(
+                monitor.get_last_export_capture_dialog_mode(max_age_seconds=5.0)
+            )
+
+    def test_capture_main_window_image_reuses_cached_frame_when_suspended(self):
+        """目标进程已挂起时，不应再走实时截图，避免窗口抓取卡死。"""
+        from process_monitor import ProcessMonitor
+        from config_manager import ConfigManager
+
+        monitor = ProcessMonitor(ConfigManager())
+        fake_image = Image.new("RGB", (320, 200), (45, 47, 52))
+        monitor._remember_export_capture(fake_image, 10.0, 23456, dialog_mode=True)
+        monitor._suspended_pids = {123}
+
+        with mock.patch("process_monitor.time.monotonic", return_value=12.0), \
+             mock.patch("process_monitor.capture_window_image") as mock_capture:
+            cached_image = monitor.capture_main_window_image()
+
+        self.assertIsNotNone(cached_image)
+        self.assertEqual(cached_image.size, fake_image.size)
+        mock_capture.assert_not_called()
 
     def test_monitor_signals(self):
         """测试监控线程信号"""

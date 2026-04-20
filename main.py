@@ -26,14 +26,14 @@ from tray_icon import TrayIconManager
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler(
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log"),
-            encoding='utf-8'
-        )
-    ]
+            encoding="utf-8",
+        ),
+    ],
 )
 logger = logging.getLogger("SoftwareUsageMeter")
 
@@ -57,6 +57,7 @@ class Application:
         # 状态
         self._is_exporting = False
         self._payment_confirmed = False
+        self._current_export_count = 0
         self._cleanup_done = False
         self._quit_requested = False
         self._original_excepthook = sys.excepthook
@@ -112,6 +113,7 @@ class Application:
         return {
             "is_exporting": self._is_exporting,
             "payment_confirmed": self._payment_confirmed,
+            "current_export_count": self._current_export_count,
             "overlay_visible": self._overlay.isVisible(),
             "timer_running": self._timer.is_running,
             "elapsed_seconds": self._timer.get_elapsed_seconds(),
@@ -129,7 +131,10 @@ class Application:
             return
 
         logger.critical("程序发生未捕获异常: %s", exc_value)
-        logger.critical("异常堆栈:\n%s", "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        logger.critical(
+            "异常堆栈:\n%s",
+            "".join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+        )
         self._log_runtime_snapshot("异常前", level=logging.CRITICAL)
         try:
             self._cleanup_before_exit()
@@ -153,6 +158,7 @@ class Application:
         self._monitor.set_post_payment_pending(False)
         self._monitor.resume_target_processes()
         self._overlay.close_payment()
+        self._current_export_count = 0
         self._recover_locked_target_windows("退出前兜底解锁，")
 
     def _handle_sigint(self, signum, frame):
@@ -176,8 +182,7 @@ class Application:
         self._timer.start()
         self._tray.set_running_state(True)
         self._tray.show_notification(
-            "计时开始",
-            f"检测到 {self._config.process_name}，已开始计时"
+            "计时开始", f"检测到 {self._config.process_name}，已开始计时"
         )
 
     def _on_process_stopped(self):
@@ -193,10 +198,55 @@ class Application:
         self._tray.set_running_state(False)
         self._is_exporting = False
         self._payment_confirmed = False
+        self._current_export_count = 0
         self._tray.show_notification(
-            "计时暂停",
-            f"{self._config.process_name} 已退出，计时暂停"
+            "计时暂停", f"{self._config.process_name} 已退出，计时暂停"
         )
+
+    def _resolve_export_count_for_payment(self) -> tuple[int | None, str]:
+        """尽量用最近缓存的导出信息，避免为了显示收费框再次做重截图。"""
+        cached_export_count = self._monitor.get_recent_export_count()
+        if cached_export_count is not None:
+            logger.info("本次收费优先使用预缓存导出张数: %s", cached_export_count)
+            return cached_export_count, "cache"
+
+        last_export_image = self._monitor.get_last_export_capture_image()
+        last_export_dialog_mode = self._monitor.get_last_export_capture_dialog_mode()
+        current_dialog_mode = self._monitor.export_hwnd is not None
+
+        detected_export_count = None
+        if last_export_image is not None:
+            detected_export_count = self._monitor.detect_export_summary_count_from_image(
+                last_export_image, dialog_mode=last_export_dialog_mode
+            )
+            if detected_export_count is None:
+                detected_export_count = self._monitor.detect_export_image_count_from_image(
+                    last_export_image, dialog_mode=last_export_dialog_mode
+                )
+            if detected_export_count is not None:
+                return detected_export_count, "last_capture"
+
+        pre_suspend_image = self._monitor.capture_main_window_image()
+        if pre_suspend_image is not None:
+            detected_export_count = self._monitor.detect_export_summary_count_from_image(
+                pre_suspend_image, dialog_mode=current_dialog_mode
+            )
+            if detected_export_count is None:
+                detected_export_count = self._monitor.detect_export_image_count_from_image(
+                    pre_suspend_image, dialog_mode=current_dialog_mode
+                )
+            if detected_export_count is not None:
+                return detected_export_count, "live_capture"
+
+        detected_export_count = self._monitor.detect_export_summary_count()
+        if detected_export_count is not None:
+            return detected_export_count, "summary_scan"
+
+        detected_export_count = self._monitor.detect_export_image_count()
+        if detected_export_count is not None:
+            return detected_export_count, "image_scan"
+
+        return None, "default"
 
     def _on_export_detected(self):
         """检测到导出行为"""
@@ -213,18 +263,40 @@ class Application:
         self._timer.pause()
         self._tray.set_running_state(False)
 
+        detected_export_count, export_count_source = self._resolve_export_count_for_payment()
+        self._monitor.set_export_state_hold(True)
+        self._monitor.suspend_target_processes()
+        if detected_export_count is None:
+            # OCR失败，使用默认导出张数
+            self._current_export_count = self._config.default_export_count
+            logger.warning(
+                "未能自动识别导出张数，使用默认值: %s 张，单张导出单价: %.2f，导出费用: %.2f",
+                self._current_export_count,
+                self._config.export_rate,
+                self._current_export_count * self._config.export_rate,
+            )
+        else:
+            self._current_export_count = detected_export_count
+            logger.info(
+                "本次导出识别到导出张数: %s，来源: %s，单张导出单价: %.2f，导出费用: %.2f",
+                self._current_export_count,
+                export_count_source,
+                self._config.export_rate,
+                self._current_export_count * self._config.export_rate,
+            )
+
         # 获取计费信息
         minutes = self._timer.get_elapsed_minutes()
         rate = self._config.rate
 
         # 显示收费弹窗
-        self._monitor.set_export_state_hold(True)
-        self._monitor.suspend_target_processes()
         self._overlay.show_payment(
             minutes,
             rate,
             hwnd=self._monitor.main_hwnd,
             lock_targets=self._monitor.lock_target_hwnds,
+            export_count=self._current_export_count,
+            export_rate=self._config.export_rate,
         )
 
     def _on_export_cancelled(self):
@@ -246,6 +318,7 @@ class Application:
             self._overlay.close_payment()
         self._is_exporting = False
         self._payment_confirmed = False
+        self._current_export_count = 0
         if self._monitor.is_process_running:
             self._timer.start()
             self._tray.set_running_state(True)
@@ -269,7 +342,10 @@ class Application:
         pwd_dialog = PasswordDialog(self._config, self._overlay)
         self._overlay.pause_keep_on_top()
         try:
-            if pwd_dialog.exec_() != PasswordDialog.Accepted or not pwd_dialog.authenticated:
+            if (
+                pwd_dialog.exec_() != PasswordDialog.Accepted
+                or not pwd_dialog.authenticated
+            ):
                 logger.info("确认收款已取消或密码验证失败，收费框保持显示")
                 self._overlay.reset_payment_confirmation()
                 return
@@ -294,7 +370,9 @@ class Application:
             self._finish_export_cycle()
             return
 
-        self._tray.show_notification("已确认收款", "已解锁导出，导出完成后将开始下一轮计时")
+        self._tray.show_notification(
+            "已确认收款", "已解锁导出，导出完成后将开始下一轮计时"
+        )
 
     def _on_show_status(self):
         """显示状态窗口"""
@@ -333,10 +411,7 @@ class Application:
     def _on_manual_trigger(self):
         """手动触发收费"""
         if not self._timer.is_running and self._timer.get_elapsed_seconds() == 0:
-            QMessageBox.information(
-                None, "提示",
-                "当前没有使用记录，无法触发收费。"
-            )
+            QMessageBox.information(None, "提示", "当前没有使用记录，无法触发收费。")
             return
 
         # 需要管理员密码确认
@@ -355,23 +430,39 @@ class Application:
         self._payment_confirmed = False
         self._monitor.set_export_state_hold(True)
         self._monitor.set_post_payment_pending(False)
+        detected_export_count, export_count_source = self._resolve_export_count_for_payment()
         self._monitor.suspend_target_processes()
-        self._overlay.show_payment(
-            minutes,
-            rate,
-            hwnd=self._monitor.main_hwnd,
-            lock_targets=self._monitor.lock_target_hwnds,
-        )
+        if detected_export_count is None:
+            # OCR失败，使用默认导出张数
+            self._current_export_count = self._config.default_export_count
+            logger.warning(
+                "未能自动识别导出张数，使用默认值: %s 张，单张导出单价: %.2f，导出费用: %.2f",
+                self._current_export_count,
+                self._config.export_rate,
+                self._current_export_count * self._config.export_rate,
+            )
+        else:
+            self._current_export_count = detected_export_count
+            logger.info(
+                "本次导出识别到导出张数: %s，来源: %s，单张导出单价: %.2f，导出费用: %.2f",
+                self._current_export_count,
+                export_count_source,
+                self._config.export_rate,
+                self._current_export_count * self._config.export_rate,
+            )
 
     def _finish_export_cycle(self):
         """当前收费流程结束，准备进入下一轮计时。"""
         self._is_exporting = False
         self._payment_confirmed = False
+        self._current_export_count = 0
         self._monitor.set_post_payment_pending(False)
         if self._monitor.is_process_running:
             self._timer.start()
             self._tray.set_running_state(True)
-            self._tray.show_notification("开始新一轮计时", "本次导出已结束，已进入下一轮计时")
+            self._tray.show_notification(
+                "开始新一轮计时", "本次导出已结束，已进入下一轮计时"
+            )
 
     def _on_quit(self):
         """退出应用"""
@@ -404,6 +495,7 @@ def check_single_instance():
     """检查是否已有实例在运行（通过互斥体）"""
     try:
         import ctypes
+
         kernel32 = ctypes.windll.kernel32
         mutex = kernel32.CreateMutexW(None, False, "SoftwareUsageMeter_SingleInstance")
         last_error = kernel32.GetLastError()
@@ -419,8 +511,9 @@ def main():
     # 单实例检测
     if not check_single_instance():
         QMessageBox.warning(
-            None, "提示",
-            "程序已在运行中，请勿重复启动！\n如需操作，请在系统托盘查找图标。"
+            None,
+            "提示",
+            "程序已在运行中，请勿重复启动！\n如需操作，请在系统托盘查找图标。",
         )
         sys.exit(1)
 

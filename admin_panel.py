@@ -75,7 +75,7 @@ class _RateInputAdapter:
     def consume_text(self) -> str:
         if self._raw_text is not None:
             return self._raw_text.strip()
-        return self._spin_box.lineEdit().text().replace(" 元/分钟", "").strip()
+        return str(self._spin_box.value())
 
     def clear(self):
         self._raw_text = None
@@ -190,6 +190,7 @@ class AdminPanel(QDialog):
         super().__init__(parent)
         self._config = config
         self._rate_input_adapter = None
+        self._export_rate_input_adapter = None
         self._init_ui()
         self._load_config()
 
@@ -245,6 +246,16 @@ class AdminPanel(QDialog):
         _apply_form_control_style(self._rate_spin)
         billing_layout.addRow(_form_row_label("计时单价："), self._rate_spin)
         self._rate_input_adapter = _RateInputAdapter(self._rate_spin)
+
+        self._export_rate_spin = QDoubleSpinBox()
+        self._export_rate_spin.setRange(0.0, 999.99)
+        self._export_rate_spin.setDecimals(2)
+        self._export_rate_spin.setSuffix(" 元/张")
+        self._export_rate_spin.setFont(_FORM_FONT)
+        self._export_rate_spin.setSingleStep(0.5)
+        _apply_form_control_style(self._export_rate_spin)
+        billing_layout.addRow(_form_row_label("单张导出单价："), self._export_rate_spin)
+        self._export_rate_input_adapter = _RateInputAdapter(self._export_rate_spin)
 
         billing_group.setLayout(billing_layout)
         layout.addWidget(billing_group)
@@ -359,6 +370,8 @@ class AdminPanel(QDialog):
         """从配置加载到界面"""
         self._rate_spin.setValue(self._config.rate)
         self._rate_input_adapter.clear()
+        self._export_rate_spin.setValue(self._config.export_rate)
+        self._export_rate_input_adapter.clear()
         self._process_input.setText(self._config.process_name)
         self._keywords_input.setText(",".join(self._config.export_window_keywords))
         self._interval_spin.setValue(self._config.monitor_interval_ms / 1000.0)
@@ -420,11 +433,23 @@ class AdminPanel(QDialog):
             self._set_status("请输入有效的数字。")
             return
 
+        export_rate_text = self._export_rate_input_adapter.consume_text()
+        try:
+            export_rate = float(export_rate_text)
+        except ValueError:
+            self._set_status("请输入有效的单张导出单价。")
+            return
+
         if rate <= 0:
             self._set_status("费率必须大于0。")
             return
+        if export_rate < 0:
+            self._set_status("单张导出单价不能小于0。")
+            return
         self._rate_spin.setValue(rate)
         self._rate_input_adapter.clear()
+        self._export_rate_spin.setValue(export_rate)
+        self._export_rate_input_adapter.clear()
 
         # 验证密码修改（如果填写了）
         old_pwd = self._old_pwd.text()
@@ -451,6 +476,7 @@ class AdminPanel(QDialog):
         # 保存所有设置
         updates = {
             "rate": rate,
+            "export_rate": export_rate,
             "process_name": self._process_input.text().strip(),
             "export_window_keywords": [
                 kw.strip()
@@ -503,6 +529,10 @@ class AdminPanel(QDialog):
     @property
     def rate_input(self):
         return self._rate_input_adapter
+
+    @property
+    def export_rate_input(self):
+        return self._export_rate_input_adapter
 
     @property
     def keywords_input(self) -> QLineEdit:
