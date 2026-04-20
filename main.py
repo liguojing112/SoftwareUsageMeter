@@ -36,6 +36,7 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("SoftwareUsageMeter")
+SINGLE_INSTANCE_MUTEX = None
 
 
 class Application:
@@ -496,8 +497,11 @@ def check_single_instance():
     try:
         import ctypes
 
+        global SINGLE_INSTANCE_MUTEX
         kernel32 = ctypes.windll.kernel32
-        mutex = kernel32.CreateMutexW(None, False, "SoftwareUsageMeter_SingleInstance")
+        SINGLE_INSTANCE_MUTEX = kernel32.CreateMutexW(
+            None, False, "SoftwareUsageMeter_SingleInstance"
+        )
         last_error = kernel32.GetLastError()
         if last_error == 183:  # ERROR_ALREADY_EXISTS
             return False
@@ -510,11 +514,13 @@ def main():
     """主入口"""
     # 单实例检测
     if not check_single_instance():
+        app = QApplication.instance() or QApplication(sys.argv)
         QMessageBox.warning(
             None,
             "提示",
             "程序已在运行中，请勿重复启动！\n如需操作，请在系统托盘查找图标。",
         )
+        app.quit()
         sys.exit(1)
 
     app = Application()

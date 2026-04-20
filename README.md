@@ -24,8 +24,7 @@ python main.py
 
 **打包：**
 ```powershell
-build.bat
-```
+pyinstaller build.spec --clean --noconfirm```
 
 ## 计费公式
 
