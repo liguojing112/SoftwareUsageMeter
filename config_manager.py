@@ -32,6 +32,9 @@ DEFAULT_CONFIG = {
     "default_export_count": 1,  # 默认导出张数（OCR失败时使用）
     "admin_password": hash_password("admin"),  # 默认密码: admin
     "qr_code_path": "",  # 收款码图片路径
+    "wechat_qr_code_path": "",  # 微信收款码图片路径
+    "alipay_qr_code_path": "",  # 支付宝收款码图片路径
+    "wallpaper_path": "",  # 壁纸图片路径
     "process_name": "PixCake.exe",  # 像素蛋糕进程名
     "export_window_keywords": ["导出", "Export"],  # 导出窗口关键词
     "monitor_interval_ms": 2000,  # 进程监控间隔（毫秒）
@@ -97,6 +100,18 @@ class ConfigManager:
     @property
     def qr_code_path(self) -> str:
         return self._config.get("qr_code_path", "")
+
+    @property
+    def wechat_qr_code_path(self) -> str:
+        return self._config.get("wechat_qr_code_path", "") or self.qr_code_path
+
+    @property
+    def alipay_qr_code_path(self) -> str:
+        return self._config.get("alipay_qr_code_path", "") or self.qr_code_path
+
+    @property
+    def wallpaper_path(self) -> str:
+        return self._config.get("wallpaper_path", "")
 
     @property
     def process_name(self) -> str:

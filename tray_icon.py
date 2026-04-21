@@ -6,11 +6,14 @@
 3. 托盘提示气泡
 """
 
+import os
+
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QBrush
+from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QBrush, QLinearGradient
 from PyQt5.QtWidgets import (
     QSystemTrayIcon, QMenu, QAction, QWidget,
-    QVBoxLayout, QLabel, QHBoxLayout, QApplication, QSizePolicy
+    QVBoxLayout, QLabel, QHBoxLayout, QApplication, QSizePolicy, QFrame,
+    QGraphicsDropShadowEffect, QScrollArea
 )
 
 
@@ -80,8 +83,9 @@ def create_running_icon() -> QIcon:
 class StatusWidget(QWidget):
     """状态显示小窗口"""
 
-    def __init__(self, parent=None):
+    def __init__(self, config=None, parent=None):
         super().__init__(parent)
+        self._config = config
         self.setWindowFlags(
             Qt.Window |
             Qt.WindowStaysOnTopHint |
@@ -89,126 +93,275 @@ class StatusWidget(QWidget):
             Qt.WindowCloseButtonHint
         )
         # 门店场景需足够宽高，避免大字号「已用时」等被裁切
-        self.resize(1080, 780)
-        self.setMinimumSize(1020, 700)
+        self.resize(1080, 860)
+        self.setMinimumSize(1020, 780)
         self.setWindowTitle("计时计费 - 状态")
+        self._wallpaper_pixmap = None
+        self._load_wallpaper()
         self._init_ui()
 
     def _init_ui(self):
+        self.setAutoFillBackground(False)
+        self.setObjectName("StatusWidgetRoot")
         self.setStyleSheet("""
-            QWidget {
-                background-color: #f7fbff;
+            QWidget#StatusWidgetRoot { background: transparent; }
+            QScrollArea {
+                background: transparent;
+                border: none;
             }
-            QLabel {
-                color: #1f2d3d;
+            QScrollBar:vertical {
+                background: rgba(255, 255, 255, 0.10);
+                width: 12px;
+                border-radius: 6px;
+                margin: 12px 0 12px 0;
             }
-            QLabel#status_label {
-                padding: 6px 4px 10px 4px;
+            QScrollBar::handle:vertical {
+                background: rgba(255, 255, 255, 0.72);
+                min-height: 42px;
+                border-radius: 6px;
             }
-            QLabel#time_label {
-                padding: 96px 36px 108px 36px;
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
             }
-            QLabel#cost_label {
-                padding: 8px 4px 12px 4px;
+            QFrame#statusShell {
+                background-color: rgba(255, 255, 255, 0.26);
+                border: 1px solid rgba(255, 255, 255, 0.58);
+                border-radius: 28px;
             }
-            QLabel#process_label {
-                padding: 6px 4px;
+            QFrame#statusMetricCard {
+                background-color: rgba(255, 255, 255, 0.26);
+                border: 1px solid rgba(255, 255, 255, 0.44);
+                border-radius: 24px;
             }
-            QLabel#hint_label {
-                padding: 10px 4px 16px 4px;
-            }
+            QLabel { color: #102033; background: transparent; }
         """)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(24)
-        layout.setContentsMargins(44, 36, 44, 36)
+        layout.setSpacing(0)
+        layout.setContentsMargins(18, 18, 18, 18)
+
+        scroll_area = QScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        layout.addWidget(scroll_area)
+
+        content = QWidget()
+        content.setAttribute(Qt.WA_StyledBackground, True)
+        content.setStyleSheet("background: transparent;")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(10, 8, 10, 8)
+        content_layout.setSpacing(0)
+        scroll_area.setWidget(content)
+
+        shell = QFrame(self)
+        shell.setObjectName("statusShell")
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(40)
+        shadow.setOffset(0, 18)
+        shadow.setColor(QColor(0, 0, 0, 110))
+        shell.setGraphicsEffect(shadow)
+        content_layout.addWidget(shell)
+
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setSpacing(26)
+        shell_layout.setContentsMargins(34, 30, 34, 34)
 
         wide_policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         wide_policy.setHorizontalStretch(1)
 
-        # 状态标签
+        header_eyebrow = QLabel("LIVE MONITOR · 终端状态")
+        header_eyebrow.setFont(QFont("Microsoft YaHei", 13, QFont.Bold))
+        header_eyebrow.setStyleSheet("color: #3f6fc2; letter-spacing: 1px;")
+        shell_layout.addWidget(header_eyebrow)
+
+        title = QLabel("当前计时与收费状态")
+        title.setFont(QFont("Microsoft YaHei", 28, QFont.Bold))
+        title.setStyleSheet("color: #102033;")
+        shell_layout.addWidget(title)
+
+        subtitle = QLabel("后台已接管导出检测，触发收费时会自动暂停导出。")
+        subtitle.setFont(QFont("Microsoft YaHei", 14))
+        subtitle.setStyleSheet("color: rgba(16, 32, 51, 0.72);")
+        shell_layout.addWidget(subtitle)
+
         self._status_label = QLabel("⏸ 未检测到目标程序")
         self._status_label.setObjectName("status_label")
-        self._status_label.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
-        self._status_label.setStyleSheet("color: #666666;")
+        self._status_label.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
+        self._status_label.setStyleSheet(
+            """
+            color: #e7fff2;
+            background-color: rgba(33, 128, 86, 0.28);
+            border: 1px solid rgba(33, 128, 86, 0.46);
+            border-radius: 16px;
+            padding: 10px 16px;
+            """
+        )
         self._status_label.setSizePolicy(wide_policy)
         self._status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        layout.addWidget(self._status_label)
+        shell_layout.addWidget(self._status_label)
 
-        layout.addSpacing(24)
+        hero_card = QFrame()
+        hero_card.setObjectName("statusMetricCard")
+        hero_layout = QVBoxLayout(hero_card)
+        hero_layout.setContentsMargins(30, 30, 30, 34)
+        hero_layout.setSpacing(12)
 
-        # 计时显示（行高与左右留白按约三倍放大，避免大字号被裁成一条）
-        self._time_label = QLabel("已用时：00:00:00")
+        hero_hint = QLabel("已用时")
+        hero_hint.setFont(QFont("Microsoft YaHei", 16))
+        hero_hint.setStyleSheet("color: rgba(16, 32, 51, 0.58);")
+        hero_layout.addWidget(hero_hint)
+
+        self._time_label = QLabel("00:00:00")
         self._time_label.setObjectName("time_label")
-        self._time_label.setFont(QFont("Microsoft YaHei", 40, QFont.Bold))
-        self._time_label.setStyleSheet("color: #2c3e50;")
+        self._time_label.setFont(QFont("Microsoft YaHei", 46, QFont.Bold))
+        self._time_label.setStyleSheet("color: #102033;")
         self._time_label.setWordWrap(False)
         time_row_policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         time_row_policy.setHorizontalStretch(1)
         self._time_label.setSizePolicy(time_row_policy)
         self._time_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self._time_label.setMinimumHeight(312)
-        layout.addWidget(self._time_label)
+        self._time_label.setMinimumHeight(190)
+        hero_layout.addWidget(self._time_label)
+        hero_card.setMinimumHeight(270)
+        shell_layout.addWidget(hero_card)
 
-        layout.addSpacing(24)
+        metrics_row = QHBoxLayout()
+        metrics_row.setSpacing(18)
 
-        # 费用显示
-        self._cost_label = QLabel("预计费用：¥ 0.00")
+        fee_card = QFrame()
+        fee_card.setObjectName("statusMetricCard")
+        fee_layout = QVBoxLayout(fee_card)
+        fee_layout.setContentsMargins(22, 20, 22, 20)
+        fee_layout.setSpacing(10)
+        fee_hint = QLabel("预计费用")
+        fee_hint.setFont(QFont("Microsoft YaHei", 14))
+        fee_hint.setStyleSheet("color: rgba(16, 32, 51, 0.58);")
+        fee_layout.addWidget(fee_hint)
+
+        self._cost_label = QLabel("¥ 0.00")
         self._cost_label.setObjectName("cost_label")
-        self._cost_label.setFont(QFont("Microsoft YaHei", 26))
-        self._cost_label.setStyleSheet("color: #e74c3c;")
+        self._cost_label.setFont(QFont("Microsoft YaHei", 30, QFont.Bold))
+        self._cost_label.setStyleSheet("color: #f39b2f;")
         self._cost_label.setSizePolicy(wide_policy)
         self._cost_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        layout.addWidget(self._cost_label)
+        fee_layout.addWidget(self._cost_label)
+        fee_card.setMinimumHeight(150)
+        metrics_row.addWidget(fee_card, 3)
 
-        # 进程名
-        self._process_label = QLabel("")
+        process_card = QFrame()
+        process_card.setObjectName("statusMetricCard")
+        process_layout = QVBoxLayout(process_card)
+        process_layout.setContentsMargins(22, 20, 22, 20)
+        process_layout.setSpacing(8)
+        process_hint = QLabel("监控进程")
+        process_hint.setFont(QFont("Microsoft YaHei", 14))
+        process_hint.setStyleSheet("color: rgba(16, 32, 51, 0.58);")
+        process_layout.addWidget(process_hint)
+
+        self._process_label = QLabel("未设置")
         self._process_label.setObjectName("process_label")
-        self._process_label.setFont(QFont("Microsoft YaHei", 16))
-        self._process_label.setStyleSheet("color: #999999;")
+        self._process_label.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+        self._process_label.setStyleSheet("color: #1b365d;")
         self._process_label.setSizePolicy(wide_policy)
         self._process_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        layout.addWidget(self._process_label)
+        self._process_label.setWordWrap(True)
+        process_layout.addWidget(self._process_label)
+        process_card.setMinimumHeight(150)
+        metrics_row.addWidget(process_card, 2)
+        shell_layout.addLayout(metrics_row)
 
         self._hint_label = QLabel("检测到导出窗口后会暂停计时，并弹出收费页面。")
         self._hint_label.setObjectName("hint_label")
         self._hint_label.setWordWrap(True)
-        self._hint_label.setFont(QFont("Microsoft YaHei", 15))
-        self._hint_label.setStyleSheet("color: #607d8b;")
+        self._hint_label.setFont(QFont("Microsoft YaHei", 14))
+        self._hint_label.setStyleSheet("color: rgba(16, 32, 51, 0.62);")
         self._hint_label.setSizePolicy(wide_policy)
         self._hint_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        layout.addWidget(self._hint_label)
+        shell_layout.addWidget(self._hint_label)
 
-        layout.addStretch()
+        shell_layout.addStretch()
+
+    def _load_wallpaper(self):
+        """加载壁纸"""
+        if self._config is None:
+            self._wallpaper_pixmap = None
+            return
+        wp_path = getattr(self._config, "wallpaper_path", "")
+        if wp_path and os.path.exists(wp_path):
+            pixmap = QPixmap(wp_path)
+            if not pixmap.isNull():
+                self._wallpaper_pixmap = pixmap
+                return
+        self._wallpaper_pixmap = None
+
+    def paintEvent(self, event):
+        """绘制壁纸背景"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        if self._wallpaper_pixmap and not self._wallpaper_pixmap.isNull():
+            scaled = self._wallpaper_pixmap.scaled(
+                self.size(),
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation
+            )
+            x = (scaled.width() - self.width()) // 2
+            y = (scaled.height() - self.height()) // 2
+            cropped = scaled.copy(x, y, self.width(), self.height())
+            painter.setOpacity(0.68)
+            painter.drawPixmap(0, 0, cropped)
+            painter.setOpacity(1.0)
+        gradient = QLinearGradient(0, 0, self.width(), self.height())
+        gradient.setColorAt(0.0, QColor(255, 255, 255, 24))
+        gradient.setColorAt(0.5, QColor(222, 232, 244, 42))
+        gradient.setColorAt(1.0, QColor(208, 220, 236, 62))
+        painter.fillRect(self.rect(), gradient)
+        painter.end()
+        super().paintEvent(event)
 
     def set_running(self, is_running: bool):
         """设置运行状态"""
-        status_pad = "padding: 6px 4px 10px 4px;"
         if is_running:
             self._status_label.setText("▶ 正在计时")
-            self._status_label.setStyleSheet(f"color: #27ae60; {status_pad}")
+            self._status_label.setStyleSheet(
+                """
+                color: #effff6;
+                background-color: rgba(33, 128, 86, 0.28);
+                border: 1px solid rgba(33, 128, 86, 0.42);
+                border-radius: 16px;
+                padding: 10px 16px;
+                """
+            )
         else:
             self._status_label.setText("⏸ 未检测到目标程序")
-            self._status_label.setStyleSheet(f"color: #666666; {status_pad}")
+            self._status_label.setStyleSheet(
+                """
+                color: #25354b;
+                background-color: rgba(255, 255, 255, 0.32);
+                border: 1px solid rgba(255, 255, 255, 0.5);
+                border-radius: 16px;
+                padding: 10px 16px;
+                """
+            )
 
     def update_time(self, time_str: str):
         """更新计时显示"""
-        self._time_label.setText(f"已用时：{time_str}")
+        self._time_label.setText(time_str)
 
     def update_cost(self, minutes: int, rate: float):
         """更新费用显示"""
         total = minutes * rate
-        self._cost_label.setText(f"预计费用：¥ {total:.2f}")
+        self._cost_label.setText(f"¥ {total:.2f}")
 
     def update_process(self, process_name: str):
         """更新进程名显示"""
-        self._process_label.setText(f"监控进程：{process_name}")
+        self._process_label.setText(process_name or "未设置")
 
     def reset_display(self):
         """重置所有显示"""
         self.set_running(False)
-        self._time_label.setText("已用时：00:00:00")
-        self._cost_label.setText("预计费用：¥ 0.00")
+        self._time_label.setText("00:00:00")
+        self._cost_label.setText("¥ 0.00")
 
 
 class TrayIconManager:
@@ -216,7 +369,7 @@ class TrayIconManager:
 
     def __init__(self, config, parent=None):
         self._config = config
-        self._status_widget = StatusWidget()
+        self._status_widget = StatusWidget(config=config)
 
         # 创建托盘图标
         self._tray = QSystemTrayIcon(create_default_icon(), parent)

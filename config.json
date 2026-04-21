@@ -3,7 +3,10 @@
   "export_rate": 1.0,
   "default_export_count": 1,
   "admin_password": "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918",
-  "qr_code_path": "C:/学习/李国敬毕业设计/收款码.jpg",
+  "qr_code_path": "C:/学习/李国敬毕业设计/微信收款码.jpg",
+  "wechat_qr_code_path": "C:/学习/李国敬毕业设计/微信收款码.jpg",
+  "alipay_qr_code_path": "C:/学习/李国敬毕业设计/支付宝收款码.jpg",
+  "wallpaper_path": "C:/Downloads/image1.png",
   "process_name": "PixCake.exe",
   "export_window_keywords": [
     "导出",
