@@ -1510,8 +1510,9 @@ class ProcessMonitor(QThread):
         self._debug_export_capture_enabled = bool(
             self._config.get("debug_export_capture", False)
         )
+        # 默认开启居中对话框扫描，覆盖更多机器上的导出场景。
         self._centered_dialog_scan_enabled = bool(
-            self._config.get("centered_dialog_scan", False)
+            self._config.get("centered_dialog_scan", True)
         )
         self._debug_export_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), EXPORT_DEBUG_DIRNAME
@@ -1782,6 +1783,7 @@ class ProcessMonitor(QThread):
         export_pid: int | None,
         pre_export_visual: bool,
         dialog_mode: bool,
+        trigger_reason: str,
     ):
         """在监控线程内立刻确认导出，避免后续慢 OCR 再拖延触发。"""
         self._remember_export_capture(
@@ -1797,21 +1799,27 @@ class ProcessMonitor(QThread):
         self._startup_guard_logged = False
         if export_hwnd:
             logger.info(
-                "确认导出窗口: hwnd=%s, pid=%s, title=%s, class=%s, export_worker_pid=%s",
+                "确认导出窗口: hwnd=%s, pid=%s, title=%s, class=%s, export_worker_pid=%s, trigger_reason=%s",
                 export_hwnd,
                 get_window_pid(export_hwnd),
                 get_window_title(export_hwnd),
                 get_window_class(export_hwnd),
                 export_pid,
+                trigger_reason,
             )
         elif pre_export_visual:
             logger.info(
-                "确认导出页预判: capture_hwnd=%s, cached_export_count=%s",
+                "确认导出页预判: capture_hwnd=%s, cached_export_count=%s, trigger_reason=%s",
                 capture_hwnd,
                 self.get_recent_export_count(5.0),
+                trigger_reason,
             )
         else:
-            logger.info("确认导出子进程: export_worker_pid=%s", export_pid)
+            logger.info(
+                "确认导出子进程: export_worker_pid=%s, trigger_reason=%s",
+                export_pid,
+                trigger_reason,
+            )
         self.export_detected.emit()
 
     def _get_export_clear_debounce_seconds(self) -> float:
@@ -2065,23 +2073,66 @@ class ProcessMonitor(QThread):
                         dialog_mode=dialog_mode,
                         button_bounds=export_button_bounds,
                     )
-                export_page_context = False
-                if export_visual_candidate and summary_probe_count is None:
-                    export_page_context = self._refresh_export_page_context(
-                        now, capture_hwnd, main_image, export_button_bounds
-                    )
-                else:
-                    self._export_page_context_active = False
-                    self._export_page_context_hwnd = capture_hwnd
-                    self._export_page_context_checked_at = now
-                export_visual = export_visual_candidate and export_page_context
+                self._export_page_context_active = False
+                self._export_page_context_hwnd = capture_hwnd
+                self._export_page_context_checked_at = now
+                # 找到黄色按钮即视为视觉证据，不再强制要求 OCR 二次验证。
+                export_visual = export_visual_candidate
                 export_button_clicked = (
                     self._consume_export_button_click(capture_hwnd, export_button_bounds)
-                    if export_visual
+                    if export_visual or export_visual_candidate
                     else False
                 )
                 if not export_visual:
                     self._last_left_button_down = False
+                has_cached_export_count = self.get_recent_export_count(5.0) is not None
+                pre_export_visual = (
+                    summary_probe_count is not None
+                    or export_visual
+                    or export_button_clicked
+                    or (
+                    export_visual_candidate and has_cached_export_count
+                    )
+                )
+                trigger_reasons = []
+                if export_hwnd is not None:
+                    trigger_reasons.append("export_hwnd")
+                if export_pid is not None:
+                    trigger_reasons.append("export_worker_pid")
+                if summary_probe_count is not None:
+                    trigger_reasons.append("summary_probe")
+                if export_visual:
+                    trigger_reasons.append("export_visual")
+                if export_button_clicked:
+                    trigger_reasons.append("export_button_clicked")
+                trigger_reason = ",".join(trigger_reasons) if trigger_reasons else "unknown"
+                if (
+                    not self._was_exporting
+                    and not self._hold_export_state
+                    and not self._post_payment_pending
+                    and not is_within_guard_window(
+                        now, self._process_started_at, PROCESS_STARTUP_GUARD_SECONDS
+                    )
+                    and (
+                        export_hwnd is not None
+                        or export_pid is not None
+                        or summary_probe_count is not None
+                        or export_visual
+                        or export_button_clicked
+                    )
+                ):
+                    self._export_clear_candidate_since = None
+                    self._confirm_export_detected(
+                        now,
+                        main_image,
+                        capture_hwnd,
+                        export_hwnd,
+                        export_pid,
+                        pre_export_visual,
+                        dialog_mode,
+                        trigger_reason,
+                    )
+                    continue
                 should_refresh_export_count = all(
                     [
                         not self._hold_export_state,
@@ -2099,38 +2150,6 @@ class ProcessMonitor(QThread):
                         dialog_mode=dialog_mode,
                         button_bounds=export_button_bounds,
                     )
-                has_cached_export_count = self.get_recent_export_count(5.0) is not None
-                pre_export_visual = (
-                    summary_probe_count is not None
-                    or export_visual
-                    or (
-                    export_visual_candidate and has_cached_export_count
-                    )
-                )
-                if (
-                    not self._was_exporting
-                    and not self._hold_export_state
-                    and not self._post_payment_pending
-                    and not is_within_guard_window(
-                        now, self._process_started_at, PROCESS_STARTUP_GUARD_SECONDS
-                    )
-                    and (
-                        export_hwnd is not None
-                        or export_pid is not None
-                        or summary_probe_count is not None
-                    )
-                ):
-                    self._export_clear_candidate_since = None
-                    self._confirm_export_detected(
-                        now,
-                        main_image,
-                        capture_hwnd,
-                        export_hwnd,
-                        export_pid,
-                        pre_export_visual,
-                        dialog_mode,
-                    )
-                    continue
                 has_export_evidence = bool(
                     export_hwnd
                     or export_pid
@@ -2163,6 +2182,9 @@ class ProcessMonitor(QThread):
                         )
                         pre_export_visual = True
                         has_export_evidence = True
+                        if "centered_dialog_scan" not in trigger_reasons:
+                            trigger_reasons.append("centered_dialog_scan")
+                        trigger_reason = ",".join(trigger_reasons)
                 startup_guard_active = is_within_guard_window(
                     now, self._process_started_at, PROCESS_STARTUP_GUARD_SECONDS
                 )
@@ -2173,17 +2195,18 @@ class ProcessMonitor(QThread):
                         self._export_candidate_since = None
                         if not self._startup_guard_logged:
                             logger.info(
-                                "启动保护生效，暂不触发收费: pid=%s, export_hwnd=%s, export_worker_pid=%s, export_visual=%s",
+                                "启动保护生效，暂不触发收费: pid=%s, export_hwnd=%s, export_worker_pid=%s, export_visual=%s, trigger_reason=%s",
                                 self._current_pid,
                                 export_hwnd,
                                 export_pid,
                                 export_visual,
+                                trigger_reason,
                             )
                             self._startup_guard_logged = True
                     else:
                         if is_strong_export_signal(
                             export_hwnd, export_pid, pre_export_visual
-                        ):
+                        ) or export_button_clicked:
                             self._confirm_export_detected(
                                 now,
                                 main_image,
@@ -2192,15 +2215,17 @@ class ProcessMonitor(QThread):
                                 export_pid,
                                 pre_export_visual,
                                 dialog_mode,
+                                trigger_reason,
                             )
                         elif self._export_candidate_since is None:
                             self._export_candidate_since = now
                             logger.info(
-                                "检测到导出候选，进入视觉防抖观察: pid=%s, export_hwnd=%s, export_worker_pid=%s, export_visual=%s",
+                                "检测到导出候选，进入视觉防抖观察: pid=%s, export_hwnd=%s, export_worker_pid=%s, export_visual=%s, trigger_reason=%s",
                                 self._current_pid,
                                 export_hwnd,
                                 export_pid,
                                 export_visual,
+                                trigger_reason,
                             )
                         elif is_debounce_satisfied(
                             self._export_candidate_since,
@@ -2215,6 +2240,7 @@ class ProcessMonitor(QThread):
                                 export_pid,
                                 pre_export_visual,
                                 dialog_mode,
+                                trigger_reason,
                             )
                 elif not has_export_evidence and not self._was_exporting:
                     self._export_candidate_since = None

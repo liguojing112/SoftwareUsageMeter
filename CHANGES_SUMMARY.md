@@ -1,126 +1,76 @@
-# 导出张数识别问题修复 - 修改总结
+# SoftwareUsageMeter 变更摘要
 
-## 问题描述
-用户报告"收费框没有显示正确的导出张数和导出费用"，经诊断发现OCR识别失败导致导出张数始终为0。
+## 当前版本状态
 
-## 根本原因
-Windows OCR引擎无法从导出窗口截图中正确识别导出张数文本，导致`detect_export_image_count()`返回`None`，主程序将其转换为0。
+项目已完成核心功能开发，进入交付优化阶段。以下记录最近一次迭代的关键变更。
 
-## 解决方案
+---
 
-### 1. 添加默认导出张数配置
-- **文件**: `config_manager.py`
-- **修改**: 添加`default_export_count`到默认配置
-- **作用**: OCR失败时使用此默认值而非0
+## 最新变更（本次迭代）
 
-### 2. 修改OCR失败处理逻辑
-- **文件**: `main.py` (两处)
-- **修改**: 当`detect_export_image_count()`返回`None`时，使用`config.default_export_count`
-- **作用**: 确保导出张数不为0
+### 1. 放宽导出检测触发条件（核心改动）
 
-### 3. 更新配置文件
-- **文件**: `config.json`
-- **修改**: 添加`"default_export_count": 1`
-- **作用**: 提供默认值配置
+**背景：** 雇主需在线下多台不同配置的电脑部署，原触发机制过于苛刻（视觉检测强制依赖 OCR 二次验证），导致部分机器无法正常弹出收费框。
 
-### 4. 增强OCR调试日志
-- **文件**: `process_monitor.py`
-- **修改**: 添加详细的OCR识别过程日志
-- **作用**: 便于问题诊断
+**改动：**
+- 视觉检测路径不再强制要求 OCR 验证，找到黄色导出按钮即可直接触发
+- 导出按钮点击提升为独立强信号
+- 居中对话框扫描默认开启，作为兜底检测手段
+- OCR 仅负责识别导出张数，不再参与"是否弹窗"的决策
 
-### 5. 改进文本提取逻辑
-- **文件**: `process_monitor.py`
-- **修改**: 增强`extract_export_image_count_from_text()`函数
-- **作用**: 支持更多文本格式匹配
+**效果：** 6 条检测路径（窗口标题 / 导出子进程 / 视觉按钮 / OCR 摘要 / 按钮点击 / 居中对话框扫描）任意一路命中即触发，显著提升多机兼容性。
 
-### 6. 创建诊断工具
-- **新增文件**:
-  - `simple_diagnose.py` - 基础诊断
-  - `test_ocr_debug.py` - OCR模式测试
-  - `test_logic.py` - 计费逻辑测试
-  - `test_default_export.py` - 配置测试
-  - `diagnose_export.py` - 完整诊断
+**涉及文件：** `process_monitor.py`
 
-### 7. 更新文档
-- **文件**: `README.md`
-- **更新内容**:
-  - 添加混合计费说明
-  - 添加OCR识别说明
-  - 添加故障排除指南
-  - 添加诊断工具说明
-  - 更新配置说明
+### 2. 清理冗余文件
 
-## 配置说明
+**删除内容：**
+- 临时打包产物：`SoftwareUsageMeter.zip`、`package.bat`
+- 诊断脚本：`diagnose_export.py`、`simple_diagnose.py`
+- 测试脚本：`test_default_export.py`、`test_logic.py`、`test_ocr_debug.py`
+- 测试目录：`tests/`（含编译缓存）
+- 临时资源目录：`test_resources/`
+- 误创建文件：`nul`
+- Codex Plan 文件：`codex-plan-relax-export-detection.md`
 
-### 关键配置项
-```json
-{
-  "export_rate": 1.0,              // 单张导出单价（元/张）
-  "default_export_count": 1        // OCR失败时的默认张数
-}
+**效果：** 项目结构精简，仅保留核心源码、配置与文档。
+
+### 3. 文档全面更新
+
+**更新文件：**
+- `README.md` — 新增多路径检测说明，修复打包命令格式
+- `开发说明.md` — 新增导出触发链路章节，更新项目结构、测试方法、排查建议
+- `客户说明.md` — 简化 Q1 排查步骤，明确"即使 OCR 失败收费框仍会弹出"
+
+---
+
+## 当前项目结构
+
+```
+SoftwareUsageMeter/
+├─ main.py              # 程序入口
+├─ config_manager.py    # 配置管理
+├─ process_monitor.py   # 进程监控 + 导出检测 + OCR
+├─ timer_manager.py     # 计时管理
+├─ payment_overlay.py   # 收费弹窗 UI
+├─ admin_panel.py       # 管理后台
+├─ tray_icon.py         # 系统托盘
+├─ build.bat / build.spec # 打包脚本
+├─ requirements.txt     # 依赖
+├─ config.json          # 运行时配置
+├─ app.log              # 运行日志
+├─ resources/           # 资源文件
+├─ dist/                # 打包输出
+├─ README.md            # 项目概览
+├─ 开发说明.md          # 开发者文档
+├─ 客户说明.md          # 使用说明
+└─ CHANGES_SUMMARY.md   # 本文件
 ```
 
-### 调整建议
-1. **导出单价**: 根据实际业务需求设置`export_rate`
-2. **默认张数**: 根据典型导出数量设置`default_export_count`
-3. **OCR调试**: 如持续失败，可增加默认值或考虑手动输入方案
+---
 
-## 验证方法
+## 已知限制与注意事项
 
-### 1. 逻辑测试
-```bash
-python test_logic.py
-```
-
-### 2. 配置测试
-```bash
-python test_default_export.py
-```
-
-### 3. OCR测试
-```bash
-python test_ocr_debug.py
-```
-
-### 4. 完整诊断
-```bash
-python simple_diagnose.py
-```
-
-## 效果验证
-1. OCR成功时: 显示识别到的导出张数
-2. OCR失败时: 显示默认导出张数（默认1张）
-3. 导出费用: 正确计算 = 导出张数 × 导出单价
-
-## 后续改进建议
-1. **手动输入功能**: 在收费框添加手动输入导出张数选项
-2. **OCR优化**: 改进截图区域或尝试其他OCR引擎
-3. **配置界面**: 在管理面板添加默认导出张数配置项
-
-## 文件清单
-```
-修改文件:
-- config_manager.py      # 添加默认导出张数配置
-- main.py               # 修改OCR失败处理逻辑（两处）
-- process_monitor.py    # 增强OCR日志和文本提取
-- config.json           # 添加默认导出张数配置
-- README.md             # 更新文档
-
-新增文件:
-- simple_diagnose.py    # 基础诊断脚本
-- test_ocr_debug.py     # OCR模式测试
-- test_logic.py         # 计费逻辑测试
-- test_default_export.py # 配置测试
-- diagnose_export.py    # 完整诊断脚本
-- CHANGES_SUMMARY.md    # 本文件
-```
-
-## 测试验证
-所有修改已通过：
-- 单元测试 (`pytest tests/`)
-- 逻辑测试 (`python test_logic.py`)
-- 配置测试 (`python test_default_export.py`)
-- OCR模式测试 (`python test_ocr_debug.py`)
-
-## 结论
-问题已解决。现在当OCR识别失败时，系统会使用配置的默认导出张数（默认为1张），确保导出费用正确计算和显示。
+1. **OCR 识别率**：Windows OCR 对部分分辨率/深色 UI 的识别效果不稳定，已通过 `default_export_count` 兜底
+2. **调试截图**：如需排查 OCR 问题，可在 `config.json` 中开启 `debug_export_capture: true`
+3. **管理员密码**：首次部署**必须**修改默认密码 `admin`

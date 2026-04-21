@@ -23,14 +23,18 @@ from payment_overlay import PaymentOverlay
 from admin_panel import PasswordDialog, AdminPanel
 from tray_icon import TrayIconManager
 
-# 配置日志
+# 配置日志 - 兼容源码运行和 PyInstaller 打包
+if getattr(sys, "frozen", False):
+    _log_dir = os.path.dirname(sys.executable)
+else:
+    _log_dir = os.path.dirname(os.path.abspath(__file__))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log"),
+            os.path.join(_log_dir, "app.log"),
             encoding="utf-8",
         ),
     ],
