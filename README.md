@@ -7,7 +7,7 @@
 
 | 文档 | 适用对象 | 内容 |
 |------|----------|------|
-| [客户说明.md](C:\Workspace\PythonProjects\SoftwareUsageMeter\客户说明.md) | 门店操作人员 | 日常使用流程、计费方式、后台设置、常见问题 |
+| [客户说明.md](https://github.com/liguojing112/SoftwareUsageMeter/blob/main/%E5%AE%A2%E6%88%B7%E8%AF%B4%E6%98%8E.md) | 门店操作人员 | 日常使用流程、计费方式、后台设置、常见问题 |
 | [开发说明.md](C:\Workspace\PythonProjects\SoftwareUsageMeter\开发说明.md) | 开发者 / 运维 | 架构设计、模块职责、配置项、日志排障、打包说明 |
 
 ## 当前版本功能
