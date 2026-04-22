@@ -11,6 +11,7 @@ import sys
 import os
 import logging
 import signal
+import platform
 import traceback
 
 from PyQt5.QtCore import QTimer
@@ -41,6 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("SoftwareUsageMeter")
 SINGLE_INSTANCE_MUTEX = None
+APP_MONITOR_START_DELAY_MS = 350
 
 
 class Application:
@@ -77,7 +79,44 @@ class Application:
         # 初始化状态显示
         self._tray.update_process_name(self._config.process_name)
 
+        self._log_startup_context()
         logger.info("应用初始化完成")
+
+    def _start_monitor_if_needed(self):
+        """稍微延后启动监控线程，减少应用首屏卡顿。"""
+        if self._monitor.isRunning():
+            return
+        self._monitor.start()
+        logger.info("监控线程已启动")
+
+    def _log_startup_context(self):
+        """记录运行环境和关键配置，便于现场排障。"""
+        logger.info(
+            "运行环境: frozen=%s, python=%s, executable=%s, cwd=%s, platform=%s",
+            getattr(sys, "frozen", False),
+            sys.executable,
+            os.path.abspath(sys.argv[0]),
+            os.getcwd(),
+            platform.platform(),
+        )
+        logger.info(
+            "配置摘要: process_name=%s, keywords=%s, rate=%s, export_rate=%s, monitor_interval_ms=%s, "
+            "wallpaper_exists=%s, wechat_qr_exists=%s, alipay_qr_exists=%s",
+            self._config.process_name,
+            self._config.export_window_keywords,
+            self._config.rate,
+            self._config.export_rate,
+            self._config.monitor_interval_ms,
+            bool(self._config.wallpaper_path and os.path.exists(self._config.wallpaper_path)),
+            bool(
+                self._config.wechat_qr_code_path
+                and os.path.exists(self._config.wechat_qr_code_path)
+            ),
+            bool(
+                self._config.alipay_qr_code_path
+                and os.path.exists(self._config.alipay_qr_code_path)
+            ),
+        )
 
     def _connect_signals(self):
         """连接所有信号/槽"""
@@ -487,11 +526,11 @@ class Application:
         # 显示托盘图标
         self._tray.show()
 
-        # 启动监控线程
-        self._monitor.start()
+        # 延后启动监控线程，让界面先完成首帧渲染，减少启动瞬间卡顿。
+        QTimer.singleShot(APP_MONITOR_START_DELAY_MS, self._start_monitor_if_needed)
         self._signal_pump_timer.start()
 
-        logger.info("应用已启动，正在监控目标程序...")
+        logger.info("应用已启动，%sms 后开始监控目标程序...", APP_MONITOR_START_DELAY_MS)
 
         return self._app.exec_()
 

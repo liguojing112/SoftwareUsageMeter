@@ -74,10 +74,12 @@ EXPORT_DETECTION_DEBOUNCE_SECONDS = 0.8
 EXPORT_CLEAR_DEBOUNCE_SECONDS = 0.8
 EXPORT_VISUAL_DETECTION_DEBOUNCE_SECONDS = 0.0
 RUNNING_MONITOR_INTERVAL_MS = 100
+DETECTION_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
 POST_PAYMENT_EXPORT_CLEAR_DEBOUNCE_SECONDS = 12.0
 EXPORT_COUNT_REFRESH_INTERVAL_SECONDS = 1.0
 EXPORT_COUNT_CACHE_TTL_SECONDS = 30.0
 EXPORT_SUMMARY_PROBE_INTERVAL_SECONDS = 0.3
+MONITOR_VISUAL_WARMUP_SECONDS = 0.8
 CENTERED_DIALOG_SCAN_INTERVAL_SECONDS = 4.0
 CENTERED_DIALOG_DEBUG_DUMP_INTERVAL_SECONDS = 6.0
 EXPORT_DEBUG_MAX_BUNDLES = 12
@@ -1489,6 +1491,7 @@ class ProcessMonitor(QThread):
         self._hold_export_state = False
         self._known_export_worker_pids = set()
         self._process_started_at = None
+        self._monitor_started_at = None
         self._export_candidate_since = None
         self._export_clear_candidate_since = None
         self._startup_guard_logged = False
@@ -1507,6 +1510,7 @@ class ProcessMonitor(QThread):
         self._export_page_context_hwnd = None
         self._last_centered_dialog_scan_at = 0.0
         self._last_summary_probe_at = 0.0
+        self._last_detection_diagnostic_at = 0.0
         self._debug_export_capture_enabled = bool(
             self._config.get("debug_export_capture", False)
         )
@@ -1521,6 +1525,20 @@ class ProcessMonitor(QThread):
         self._debug_export_dump_seq = 0
         self._last_debug_export_bundle = None
         self._cleanup_debug_export_artifacts_if_disabled()
+        logger.info(
+            "监控器初始化: process_name=%s, keywords=%s, monitor_interval_ms=%s, "
+            "running_interval_ms=%s, startup_guard_s=%s, visual_warmup_s=%s, "
+            "summary_probe_interval_s=%s, centered_dialog_scan=%s, debug_export_capture=%s",
+            self._config.process_name,
+            self._config.export_window_keywords,
+            self._config.monitor_interval_ms,
+            RUNNING_MONITOR_INTERVAL_MS,
+            PROCESS_STARTUP_GUARD_SECONDS,
+            MONITOR_VISUAL_WARMUP_SECONDS,
+            EXPORT_SUMMARY_PROBE_INTERVAL_SECONDS,
+            self._centered_dialog_scan_enabled,
+            self._debug_export_capture_enabled,
+        )
 
     def _reset_export_candidates(self):
         self._export_candidate_since = None
@@ -1539,6 +1557,58 @@ class ProcessMonitor(QThread):
         self._export_page_context_hwnd = None
         self._last_centered_dialog_scan_at = 0.0
         self._last_summary_probe_at = 0.0
+
+    def _log_detection_diagnostic(
+        self,
+        now: float,
+        capture_hwnd: int | None,
+        export_hwnd: int | None,
+        export_pid: int | None,
+        main_image: Image.Image | None,
+        export_visual_candidate: bool,
+        export_button_clicked: bool,
+        summary_probe_count: int | None,
+        has_cached_export_count: bool,
+        has_export_evidence: bool,
+        startup_guard_active: bool,
+        should_skip_visual_probe: bool,
+        dialog_mode: bool,
+        trigger_reason: str,
+    ):
+        if (
+            self._last_detection_diagnostic_at
+            and (now - self._last_detection_diagnostic_at)
+            < DETECTION_DIAGNOSTIC_INTERVAL_SECONDS
+        ):
+            return
+        self._last_detection_diagnostic_at = now
+        capture_title = get_window_title(capture_hwnd) if capture_hwnd else ""
+        capture_class = get_window_class(capture_hwnd) if capture_hwnd else ""
+        logger.info(
+            "导出检测诊断: pid=%s, main_hwnd=%s, capture_hwnd=%s, capture_title=%s, "
+            "capture_class=%s, export_hwnd=%s, export_worker_pid=%s, image_ok=%s, "
+            "visual_candidate=%s, button_clicked=%s, summary_probe=%s, cached_count=%s, "
+            "has_evidence=%s, startup_guard=%s, visual_warmup_skip=%s, dialog_mode=%s, "
+            "centered_scan=%s, trigger_reason=%s",
+            self._current_pid,
+            self._main_hwnd,
+            capture_hwnd,
+            capture_title,
+            capture_class,
+            export_hwnd,
+            export_pid,
+            main_image is not None,
+            export_visual_candidate,
+            export_button_clicked,
+            summary_probe_count,
+            self.get_recent_export_count(5.0) if has_cached_export_count else None,
+            has_export_evidence,
+            startup_guard_active,
+            should_skip_visual_probe,
+            dialog_mode,
+            self._centered_dialog_scan_enabled,
+            trigger_reason,
+        )
 
     def _remember_export_count(self, export_count: int | None, observed_at: float):
         if export_count is None or export_count < 0:
@@ -1991,6 +2061,8 @@ class ProcessMonitor(QThread):
 
     def run(self):
         """监控主循环"""
+        if self._monitor_started_at is None:
+            self._monitor_started_at = time.monotonic()
         while self._running:
             now = time.monotonic()
             process_name = self._config.process_name
@@ -2009,7 +2081,12 @@ class ProcessMonitor(QThread):
                 self._post_payment_pending = False
                 self._reset_export_candidates()
                 self._reset_export_count_cache()
-                logger.info(f"检测到目标程序启动: PID={pid}")
+                logger.info(
+                    "检测到目标程序启动: PID=%s, main_hwnd=%s, existing_export_worker_pids=%s",
+                    pid,
+                    self._main_hwnd,
+                    sorted(self._known_export_worker_pids),
+                )
                 self.process_started.emit()
             elif is_running and self._current_pid != pid:
                 self._current_pid = pid
@@ -2020,7 +2097,12 @@ class ProcessMonitor(QThread):
                 self._post_payment_pending = False
                 self._reset_export_candidates()
                 self._reset_export_count_cache()
-                logger.info(f"检测到目标程序实例变化，切换到 PID={pid}")
+                logger.info(
+                    "检测到目标程序实例变化，切换到 PID=%s, main_hwnd=%s, existing_export_worker_pids=%s",
+                    pid,
+                    self._main_hwnd,
+                    sorted(self._known_export_worker_pids),
+                )
             elif not is_running and self._was_running:
                 self._current_pid = None
                 self._main_hwnd = None
@@ -2053,7 +2135,23 @@ class ProcessMonitor(QThread):
                 capture_hwnd = get_preferred_capture_hwnd(
                     self._current_pid, self._main_hwnd, export_hwnd
                 )
-                main_image = capture_window_image(capture_hwnd) if capture_hwnd else None
+                monitor_warmup_active = (
+                    self._monitor_started_at is not None
+                    and (now - self._monitor_started_at) < MONITOR_VISUAL_WARMUP_SECONDS
+                )
+                should_skip_visual_probe = (
+                    monitor_warmup_active
+                    and export_hwnd is None
+                    and export_pid is None
+                    and not self._hold_export_state
+                    and not self._post_payment_pending
+                    and not self._was_exporting
+                )
+                main_image = (
+                    None
+                    if should_skip_visual_probe
+                    else capture_window_image(capture_hwnd) if capture_hwnd else None
+                )
                 export_button_bounds = (
                     locate_export_button_bounds(main_image) if main_image else None
                 )
@@ -2187,6 +2285,22 @@ class ProcessMonitor(QThread):
                         trigger_reason = ",".join(trigger_reasons)
                 startup_guard_active = is_within_guard_window(
                     now, self._process_started_at, PROCESS_STARTUP_GUARD_SECONDS
+                )
+                self._log_detection_diagnostic(
+                    now,
+                    capture_hwnd,
+                    export_hwnd,
+                    export_pid,
+                    main_image,
+                    export_visual_candidate,
+                    export_button_clicked,
+                    summary_probe_count,
+                    has_cached_export_count,
+                    has_export_evidence,
+                    startup_guard_active,
+                    should_skip_visual_probe,
+                    dialog_mode,
+                    trigger_reason,
                 )
 
                 if has_export_evidence and not self._was_exporting:

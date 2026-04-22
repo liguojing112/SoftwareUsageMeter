@@ -330,8 +330,8 @@ class AdminPanel(QDialog):
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self._config = config
-        self._rate_input_adapter = None
-        self._export_rate_input_adapter = None
+        self._rate_input_adapter: _RateInputAdapter | None = None
+        self._export_rate_input_adapter: _RateInputAdapter | None = None
         self._wallpaper_pixmap = None
         self._wallpaper_label = None
         self._init_ui()
@@ -668,9 +668,9 @@ class AdminPanel(QDialog):
     def _load_config(self):
         """从配置加载到界面"""
         self._rate_spin.setValue(self._config.rate)
-        self._rate_input_adapter.clear()
+        self.rate_input.clear()
         self._export_rate_spin.setValue(self._config.export_rate)
-        self._export_rate_input_adapter.clear()
+        self.export_rate_input.clear()
         self._process_input.setText(self._config.process_name)
         self._keywords_input.setText(",".join(self._config.export_window_keywords))
         self._interval_spin.setValue(self._config.monitor_interval_ms / 1000.0)
@@ -858,14 +858,14 @@ class AdminPanel(QDialog):
 
     def _save(self):
         """保存设置"""
-        rate_text = self._rate_input_adapter.consume_text()
+        rate_text = self.rate_input.consume_text()
         try:
             rate = float(rate_text)
         except ValueError:
             self._set_status("请输入有效的数字。")
             return
 
-        export_rate_text = self._export_rate_input_adapter.consume_text()
+        export_rate_text = self.export_rate_input.consume_text()
         try:
             export_rate = float(export_rate_text)
         except ValueError:
@@ -879,9 +879,9 @@ class AdminPanel(QDialog):
             self._set_status("单张导出单价不能小于0。")
             return
         self._rate_spin.setValue(rate)
-        self._rate_input_adapter.clear()
+        self.rate_input.clear()
         self._export_rate_spin.setValue(export_rate)
-        self._export_rate_input_adapter.clear()
+        self.export_rate_input.clear()
 
         # 验证密码修改（如果填写了）
         old_pwd = self._old_pwd.text()
@@ -973,11 +973,15 @@ class AdminPanel(QDialog):
         return self._process_input
 
     @property
-    def rate_input(self):
+    def rate_input(self) -> _RateInputAdapter:
+        if self._rate_input_adapter is None:
+            raise RuntimeError("rate input adapter has not been initialized")
         return self._rate_input_adapter
 
     @property
-    def export_rate_input(self):
+    def export_rate_input(self) -> _RateInputAdapter:
+        if self._export_rate_input_adapter is None:
+            raise RuntimeError("export rate input adapter has not been initialized")
         return self._export_rate_input_adapter
 
     @property
