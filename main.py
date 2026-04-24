@@ -104,7 +104,7 @@ class StartupHintDialog(QDialog):
 
     def _init_ui(self):
         self.setWindowTitle("计时计费已启动")
-        self.setFixedSize(660, 430)
+        self.setFixedSize(760, 430)
         self.setWindowFlags(
             Qt.Window | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint
         )
@@ -113,13 +113,13 @@ class StartupHintDialog(QDialog):
         self.setObjectName("StartupHintDialog")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 28, 30, 30)
+        layout.setContentsMargins(34, 28, 34, 30)
         layout.setSpacing(0)
 
         card = QFrame(self)
         card.setObjectName("startupHintCard")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(34, 30, 34, 28)
+        card_layout.setContentsMargins(44, 30, 44, 28)
         card_layout.setSpacing(18)
         layout.addWidget(card)
 
@@ -144,6 +144,7 @@ class StartupHintDialog(QDialog):
         body.setFont(QFont("Microsoft YaHei", 13))
         body.setWordWrap(True)
         body.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        body.setContentsMargins(4, 0, 4, 0)
         body.setStyleSheet("color: rgba(17, 34, 53, 0.78); line-height: 1.5;")
         card_layout.addWidget(body, 1)
 
