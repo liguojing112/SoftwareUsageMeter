@@ -6,7 +6,9 @@
 3. 托盘提示气泡
 """
 
+import logging
 import os
+import sys
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QBrush, QLinearGradient
@@ -15,6 +17,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QLabel, QHBoxLayout, QApplication, QSizePolicy, QFrame,
     QGraphicsDropShadowEffect, QScrollArea
 )
+
+logger = logging.getLogger(__name__)
+ENABLE_UI_SHADOWS = not getattr(sys, "frozen", False)
+SAFE_STATUS_WIDGET_MODE = bool(getattr(sys, "frozen", False))
 
 
 def create_default_icon() -> QIcon:
@@ -86,6 +92,7 @@ class StatusWidget(QWidget):
     def __init__(self, config=None, parent=None):
         super().__init__(parent)
         self._config = config
+        self._safe_mode = SAFE_STATUS_WIDGET_MODE
         self.setWindowFlags(
             Qt.Window |
             Qt.WindowStaysOnTopHint |
@@ -97,43 +104,72 @@ class StatusWidget(QWidget):
         self.setMinimumSize(1020, 780)
         self.setWindowTitle("计时计费 - 状态")
         self._wallpaper_pixmap = None
-        self._load_wallpaper()
+        if not self._safe_mode:
+            self._load_wallpaper()
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._init_ui()
+        logger.info(
+            "状态页初始化: safe_mode=%s, wallpaper_enabled=%s, shadows_enabled=%s",
+            self._safe_mode,
+            not self._safe_mode,
+            ENABLE_UI_SHADOWS,
+        )
 
     def _init_ui(self):
-        self.setAutoFillBackground(False)
+        self.setAutoFillBackground(self._safe_mode)
         self.setObjectName("StatusWidgetRoot")
-        self.setStyleSheet("""
-            QWidget#StatusWidgetRoot { background: transparent; }
-            QScrollArea {
+        root_bg = "#eef3f8" if self._safe_mode else "transparent"
+        shell_bg = (
+            "rgba(255, 255, 255, 0.92)"
+            if self._safe_mode
+            else "rgba(255, 255, 255, 0.26)"
+        )
+        shell_border = (
+            "rgba(185, 196, 210, 0.92)"
+            if self._safe_mode
+            else "rgba(255, 255, 255, 0.58)"
+        )
+        card_bg = (
+            "rgba(255, 255, 255, 0.96)"
+            if self._safe_mode
+            else "rgba(255, 255, 255, 0.26)"
+        )
+        card_border = (
+            "rgba(198, 208, 220, 0.88)"
+            if self._safe_mode
+            else "rgba(255, 255, 255, 0.44)"
+        )
+        self.setStyleSheet(f"""
+            QWidget#StatusWidgetRoot {{ background: {root_bg}; }}
+            QScrollArea {{
                 background: transparent;
                 border: none;
-            }
-            QScrollBar:vertical {
+            }}
+            QScrollBar:vertical {{
                 background: rgba(255, 255, 255, 0.10);
                 width: 12px;
                 border-radius: 6px;
                 margin: 12px 0 12px 0;
-            }
-            QScrollBar::handle:vertical {
+            }}
+            QScrollBar::handle:vertical {{
                 background: rgba(255, 255, 255, 0.72);
                 min-height: 42px;
                 border-radius: 6px;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
                 height: 0px;
-            }
-            QFrame#statusShell {
-                background-color: rgba(255, 255, 255, 0.26);
-                border: 1px solid rgba(255, 255, 255, 0.58);
+            }}
+            QFrame#statusShell {{
+                background-color: {shell_bg};
+                border: 1px solid {shell_border};
                 border-radius: 28px;
-            }
-            QFrame#statusMetricCard {
-                background-color: rgba(255, 255, 255, 0.26);
-                border: 1px solid rgba(255, 255, 255, 0.44);
+            }}
+            QFrame#statusMetricCard {{
+                background-color: {card_bg};
+                border: 1px solid {card_border};
                 border-radius: 24px;
-            }
-            QLabel { color: #102033; background: transparent; }
+            }}
+            QLabel {{ color: #102033; background: transparent; }}
         """)
 
         layout = QVBoxLayout(self)
@@ -156,11 +192,12 @@ class StatusWidget(QWidget):
 
         shell = QFrame(self)
         shell.setObjectName("statusShell")
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(40)
-        shadow.setOffset(0, 18)
-        shadow.setColor(QColor(0, 0, 0, 110))
-        shell.setGraphicsEffect(shadow)
+        if ENABLE_UI_SHADOWS:
+            shadow = QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(40)
+            shadow.setOffset(0, 18)
+            shadow.setColor(QColor(0, 0, 0, 110))
+            shell.setGraphicsEffect(shadow)
         content_layout.addWidget(shell)
 
         shell_layout = QVBoxLayout(shell)
@@ -284,6 +321,9 @@ class StatusWidget(QWidget):
 
     def _load_wallpaper(self):
         """加载壁纸"""
+        if self._safe_mode:
+            self._wallpaper_pixmap = None
+            return
         if self._config is None:
             self._wallpaper_pixmap = None
             return
@@ -297,6 +337,9 @@ class StatusWidget(QWidget):
 
     def paintEvent(self, event):
         """绘制壁纸背景"""
+        if self._safe_mode:
+            super().paintEvent(event)
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         if self._wallpaper_pixmap and not self._wallpaper_pixmap.isNull():
@@ -318,6 +361,15 @@ class StatusWidget(QWidget):
         painter.fillRect(self.rect(), gradient)
         painter.end()
         super().paintEvent(event)
+
+    def showEvent(self, event):
+        logger.info(
+            "状态页显示: safe_mode=%s, size=%sx%s",
+            self._safe_mode,
+            self.width(),
+            self.height(),
+        )
+        super().showEvent(event)
 
     def set_running(self, is_running: bool):
         """设置运行状态"""
@@ -404,6 +456,7 @@ class TrayIconManager:
     def _on_activated(self, reason):
         """托盘图标激活事件"""
         if reason == QSystemTrayIcon.DoubleClick:
+            logger.info("托盘双击，准备显示状态页")
             self._status_widget.show()
             self._status_widget.raise_()
             self._status_widget.activateWindow()

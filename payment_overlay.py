@@ -11,6 +11,7 @@
 import atexit
 import logging
 import os
+import sys
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QLinearGradient
@@ -49,6 +50,7 @@ def _unlock_registered_windows():
 atexit.register(_unlock_registered_windows)
 
 logger = logging.getLogger(__name__)
+ENABLE_UI_SHADOWS = not getattr(sys, "frozen", False)
 
 _OVERLAY_CARD_BG = "rgba(255, 255, 255, 0.74)"
 _OVERLAY_PANEL_BG = "rgba(255, 255, 255, 0.42)"
@@ -156,11 +158,12 @@ class PaymentOverlay(QWidget):
             }}
             """
         )
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(42)
-        shadow.setOffset(0, 20)
-        shadow.setColor(QColor(0, 0, 0, 110))
-        shell.setGraphicsEffect(shadow)
+        if ENABLE_UI_SHADOWS:
+            shadow = QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(42)
+            shadow.setOffset(0, 20)
+            shadow.setColor(QColor(0, 0, 0, 110))
+            shell.setGraphicsEffect(shadow)
         shell.setMinimumHeight(940)
         root_layout.addWidget(shell, alignment=Qt.AlignCenter)
 

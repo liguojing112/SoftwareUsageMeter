@@ -10,7 +10,7 @@
 """
 
 import os
-from typing import Optional
+import sys
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor
@@ -31,6 +31,8 @@ from PyQt5.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
 )
+
+ENABLE_UI_SHADOWS = not getattr(sys, "frozen", False)
 
 from config_manager import hash_password, verify_password
 
@@ -73,6 +75,8 @@ def _secondary_button_css() -> str:
 
 
 def _apply_card_shadow(widget: QWidget) -> None:
+    if not ENABLE_UI_SHADOWS:
+        return
     shadow = QGraphicsDropShadowEffect(widget)
     shadow.setBlurRadius(30)
     shadow.setOffset(0, 14)
@@ -80,7 +84,7 @@ def _apply_card_shadow(widget: QWidget) -> None:
     widget.setGraphicsEffect(shadow)
 
 
-def _load_wallpaper_pixmap(path: str) -> Optional[QPixmap]:
+def _load_wallpaper_pixmap(path: str) -> QPixmap | None:
     """安全加载壁纸图片，失败时返回 None。"""
     if not path or not os.path.exists(path):
         return None
@@ -101,7 +105,7 @@ def _create_wallpaper_label(parent: QWidget) -> QLabel:
 
 
 def _update_wallpaper_label(
-    label: QLabel, pixmap: Optional[QPixmap], width: int, height: int
+    label: QLabel, pixmap: QPixmap | None, width: int, height: int
 ) -> None:
     """更新壁纸层尺寸与缩放结果。"""
     label.setGeometry(0, 0, width, height)

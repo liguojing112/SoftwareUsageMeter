@@ -76,6 +76,7 @@ EXPORT_VISUAL_DETECTION_DEBOUNCE_SECONDS = 0.0
 RUNNING_MONITOR_INTERVAL_MS = 100
 DETECTION_DIAGNOSTIC_INTERVAL_SECONDS = 5.0
 POST_PAYMENT_EXPORT_CLEAR_DEBOUNCE_SECONDS = 12.0
+POST_PAYMENT_EXPORT_TAIL_GUARD_SECONDS = 6.0
 EXPORT_COUNT_REFRESH_INTERVAL_SECONDS = 1.0
 EXPORT_COUNT_CACHE_TTL_SECONDS = 30.0
 EXPORT_SUMMARY_PROBE_INTERVAL_SECONDS = 0.3
@@ -189,16 +190,98 @@ $result.Text
 """
 
 
-def find_pid_by_name(process_name: str) -> int | None:
-    """通过进程名查找 PID，未找到返回 None"""
+def find_pids_by_name(process_name: str) -> list[int]:
+    """通过进程名查找全部匹配 PID。"""
     process_name_lower = process_name.lower()
+    matched = []
     for proc in psutil.process_iter(["pid", "name"]):
         try:
             if proc.info["name"] and proc.info["name"].lower() == process_name_lower:
-                return proc.info["pid"]
+                matched.append(proc.info["pid"])
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    return None
+    return matched
+
+
+def _get_window_area(hwnd: int | None) -> int:
+    """计算窗口面积，用于在多实例中优先挑选真正的主界面进程。"""
+    if not HAS_WIN32 or not hwnd:
+        return -1
+    try:
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    except Exception:
+        return -1
+    return max(right - left, 0) * max(bottom - top, 0)
+
+
+def is_valid_target_main_window(hwnd: int | None) -> bool:
+    """判断窗口是否像真正可操作的像素蛋糕主窗口，而不是后台/过渡进程窗口。"""
+    if not HAS_WIN32 or not hwnd:
+        return False
+    try:
+        if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+            return False
+
+        title = get_window_title(hwnd).strip().lower()
+        class_name = get_window_class(hwnd).strip().lower()
+        if not title:
+            return False
+        if class_name in {"consolewindowclass"}:
+            return False
+        if any(
+            keyword in class_name
+            for keyword in ["toolsavebits", "tooltips_class32", "ime"]
+        ):
+            return False
+
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        width = max(right - left, 0)
+        height = max(bottom - top, 0)
+        if width < 500 or height < 350:
+            return False
+
+        return True
+    except Exception:
+        return False
+
+
+def find_pid_by_name(process_name: str) -> int | None:
+    """通过进程名查找最合适的 PID，优先选择真正带主窗口的实例。"""
+    matched_pids = find_pids_by_name(process_name)
+    if not matched_pids:
+        return None
+
+    candidates: list[tuple[int, float, int]] = []
+    for pid in matched_pids:
+        main_hwnd = find_main_window(pid)
+        if not is_valid_target_main_window(main_hwnd):
+            continue
+        window_area = _get_window_area(main_hwnd)
+        try:
+            created_at = psutil.Process(pid).create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            created_at = 0.0
+        candidates.append((pid, created_at, window_area))
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (
+            item[2] > 0,  # 先选有主窗口的
+            item[2],      # 再选窗口更大的
+            item[1],      # 最后选更新的实例
+        ),
+        reverse=True,
+    )
+    selected_pid = candidates[0][0]
+    logger.info(
+        "检测到多个同名进程，已选择主实例: process_name=%s, matched_pids=%s, selected_pid=%s",
+        process_name,
+        matched_pids,
+        selected_pid,
+    )
+    return selected_pid
 
 
 def is_process_running(process_name: str) -> bool:
@@ -1320,6 +1403,8 @@ def find_main_window(pid: int) -> int | None:
 
     def candidate_score(hwnd: int) -> int:
         try:
+            if not is_valid_target_main_window(hwnd):
+                return -1
             rect = win32gui.GetWindowRect(hwnd)
             width = max(rect[2] - rect[0], 0)
             height = max(rect[3] - rect[1], 0)
@@ -1463,6 +1548,31 @@ def recover_process_windows(
     return restored
 
 
+def activate_window(hwnd: int | None) -> bool:
+    """尽量把目标窗口恢复到前台并恢复可见。"""
+    if not HAS_WIN32 or not hwnd:
+        return False
+    try:
+        if not win32gui.IsWindow(hwnd):
+            return False
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        else:
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+        win32gui.BringWindowToTop(hwnd)
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        try:
+            win32gui.SetActiveWindow(hwnd)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
 class ProcessMonitor(QThread):
     """
     进程监控线程
@@ -1497,6 +1607,7 @@ class ProcessMonitor(QThread):
         self._startup_guard_logged = False
         self._suspended_pids = set()
         self._post_payment_pending = False
+        self._post_payment_pending_since = None
         self._cached_export_count = None
         self._cached_export_count_at = None
         self._last_export_count_refresh_at = 0.0
@@ -1865,6 +1976,12 @@ class ProcessMonitor(QThread):
         self._export_hwnd = export_hwnd
         self._export_pid = export_pid
         self._was_exporting = True
+        # 在信号发到主线程前，先把监控状态切到“导出保持”，并立即冻结目标进程，
+        # 避免慢机器上收费框还没显示出来，像素蛋糕已经先完成导出。
+        self._hold_export_state = True
+        self._post_payment_pending = False
+        self._post_payment_pending_since = None
+        self.suspend_target_processes()
         self._export_candidate_since = None
         self._startup_guard_logged = False
         if export_hwnd:
@@ -2050,6 +2167,7 @@ class ProcessMonitor(QThread):
             "export_clear_candidate_since": self._export_clear_candidate_since,
             "suspended_pids": sorted(self._suspended_pids),
             "post_payment_pending": self._post_payment_pending,
+            "post_payment_pending_since": self._post_payment_pending_since,
             "cached_export_count": self._cached_export_count,
             "cached_export_count_at": self._cached_export_count_at,
             "export_page_context_active": self._export_page_context_active,
@@ -2079,6 +2197,7 @@ class ProcessMonitor(QThread):
                 self._process_started_at = now
                 self._startup_guard_logged = False
                 self._post_payment_pending = False
+                self._post_payment_pending_since = None
                 self._reset_export_candidates()
                 self._reset_export_count_cache()
                 logger.info(
@@ -2089,12 +2208,15 @@ class ProcessMonitor(QThread):
                 )
                 self.process_started.emit()
             elif is_running and self._current_pid != pid:
+                keep_post_payment_pending = self._post_payment_pending
                 self._current_pid = pid
                 self._main_hwnd = find_main_window(pid)
                 self._known_export_worker_pids = find_export_worker_pids(pid)
                 self._process_started_at = now
                 self._startup_guard_logged = False
-                self._post_payment_pending = False
+                if not keep_post_payment_pending:
+                    self._post_payment_pending = False
+                    self._post_payment_pending_since = None
                 self._reset_export_candidates()
                 self._reset_export_count_cache()
                 logger.info(
@@ -2103,6 +2225,8 @@ class ProcessMonitor(QThread):
                     self._main_hwnd,
                     sorted(self._known_export_worker_pids),
                 )
+                if keep_post_payment_pending:
+                    logger.info("付款后等待导出结束期间检测到实例变化，保留同一次导出保护状态")
             elif not is_running and self._was_running:
                 self._current_pid = None
                 self._main_hwnd = None
@@ -2113,6 +2237,7 @@ class ProcessMonitor(QThread):
                 self._process_started_at = None
                 self._startup_guard_logged = False
                 self._post_payment_pending = False
+                self._post_payment_pending_since = None
                 self._reset_export_candidates()
                 self._reset_export_count_cache()
                 self._suspended_pids = set()
@@ -2303,6 +2428,32 @@ class ProcessMonitor(QThread):
                     trigger_reason,
                 )
 
+                if (
+                    self._post_payment_pending
+                    and has_export_evidence
+                    and not self._was_exporting
+                ):
+                    self._remember_export_capture(
+                        main_image,
+                        now,
+                        capture_hwnd,
+                        dialog_mode=dialog_mode,
+                    )
+                    self._export_hwnd = export_hwnd
+                    self._export_pid = export_pid
+                    self._was_exporting = True
+                    self._export_clear_candidate_since = None
+                    logger.info(
+                        "付款后检测到同一次导出尾迹，继续等待导出结束: export_hwnd=%s, export_worker_pid=%s, trigger_reason=%s",
+                        export_hwnd,
+                        export_pid,
+                        trigger_reason,
+                    )
+                    self._known_export_worker_pids = worker_pids
+                    interval = min(self._config.monitor_interval_ms, RUNNING_MONITOR_INTERVAL_MS)
+                    self.msleep(interval)
+                    continue
+
                 if has_export_evidence and not self._was_exporting:
                     self._export_clear_candidate_since = None
                     if startup_guard_active:
@@ -2364,6 +2515,16 @@ class ProcessMonitor(QThread):
                         interval = min(self._config.monitor_interval_ms, 500)
                         self.msleep(interval)
                         continue
+                    if (
+                        self._post_payment_pending
+                        and self._post_payment_pending_since is not None
+                        and (now - self._post_payment_pending_since)
+                        < POST_PAYMENT_EXPORT_TAIL_GUARD_SECONDS
+                    ):
+                        self._export_clear_candidate_since = None
+                        interval = min(self._config.monitor_interval_ms, RUNNING_MONITOR_INTERVAL_MS)
+                        self.msleep(interval)
+                        continue
                     clear_debounce_seconds = self._get_export_clear_debounce_seconds()
                     if self._export_clear_candidate_since is None:
                         self._export_clear_candidate_since = now
@@ -2407,6 +2568,7 @@ class ProcessMonitor(QThread):
         if self._post_payment_pending != active:
             self._export_clear_candidate_since = None
         self._post_payment_pending = active
+        self._post_payment_pending_since = time.monotonic() if active else None
 
     def get_recent_export_count(
         self, max_age_seconds: float = EXPORT_COUNT_CACHE_TTL_SECONDS
@@ -2497,7 +2659,12 @@ class ProcessMonitor(QThread):
             return []
 
         target_pids = get_process_family_pids(self._current_pid)
-        suspended = suspend_processes(target_pids)
+        pending_pids = set(target_pids) - set(self._suspended_pids)
+        if not pending_pids:
+            logger.info("目标进程族已处于挂起状态，跳过重复挂起: %s", sorted(self._suspended_pids))
+            return sorted(self._suspended_pids)
+
+        suspended = suspend_processes(pending_pids)
         if suspended:
             self._suspended_pids.update(suspended)
             logger.info("已挂起目标进程族，等待付款确认: %s", suspended)
@@ -2513,6 +2680,53 @@ class ProcessMonitor(QThread):
             logger.info("已恢复目标进程族: %s", resumed)
         self._suspended_pids.difference_update(resumed)
         return resumed
+
+    def restore_target_interaction(self) -> dict:
+        """恢复付款后/取消后的目标程序交互状态，并尽量把主窗口拉回前台。"""
+        try:
+            resumed = self.resume_target_processes()
+
+            selected_pid = find_pid_by_name(self._config.process_name)
+            if selected_pid and selected_pid != self._current_pid:
+                self._current_pid = selected_pid
+                self._main_hwnd = find_main_window(selected_pid) or self._main_hwnd
+                logger.info(
+                    "恢复交互时重新选择主实例: process_name=%s, current_pid=%s, main_hwnd=%s",
+                    self._config.process_name,
+                    self._current_pid,
+                    self._main_hwnd,
+                )
+            elif selected_pid and not self._main_hwnd:
+                self._main_hwnd = find_main_window(selected_pid) or self._main_hwnd
+
+            restored = recover_process_windows(
+                self._config.process_name, hwnds=self.lock_target_hwnds
+            )
+            target_hwnd = self._main_hwnd
+            if not target_hwnd and self._current_pid:
+                target_hwnd = find_main_window(self._current_pid)
+                self._main_hwnd = target_hwnd or self._main_hwnd
+
+            activated = activate_window(target_hwnd)
+            result = {
+                "resumed": resumed,
+                "restored": restored,
+                "activated": activated,
+                "target_hwnd": target_hwnd,
+                "current_pid": self._current_pid,
+            }
+            logger.info("目标交互恢复结果: %s", result)
+            return result
+        except Exception:
+            logger.exception("恢复目标交互失败")
+            return {
+                "resumed": [],
+                "restored": [],
+                "activated": False,
+                "target_hwnd": self._main_hwnd,
+                "current_pid": self._current_pid,
+                "error": True,
+            }
 
     @property
     def current_pid(self) -> int | None:
