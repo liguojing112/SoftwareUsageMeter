@@ -16,13 +16,20 @@ import sys
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QPixmap, QColor, QPainter, QLinearGradient
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QFrame, QApplication, QGraphicsDropShadowEffect
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QFrame,
+    QApplication,
+    QGraphicsDropShadowEffect,
 )
 
 try:
     import win32gui
     import win32con
+
     HAS_WIN32 = True
 except ImportError:
     HAS_WIN32 = False
@@ -33,7 +40,6 @@ _LOCKED_HWND_REGISTRY = set()
 
 def _unlock_registered_windows():
     """Python 正常退出时恢复所有已被锁定的窗口。"""
-
 
     if not HAS_WIN32:
         return
@@ -52,9 +58,9 @@ atexit.register(_unlock_registered_windows)
 logger = logging.getLogger(__name__)
 ENABLE_UI_SHADOWS = not getattr(sys, "frozen", False)
 
-_OVERLAY_CARD_BG = "rgba(255, 255, 255, 0.74)"
-_OVERLAY_PANEL_BG = "rgba(255, 255, 255, 0.42)"
-_OVERLAY_PANEL_BORDER = "rgba(255, 255, 255, 0.65)"
+_OVERLAY_CARD_BG = "rgba(255, 255, 255, 0.44)"
+_OVERLAY_PANEL_BG = "rgba(255, 255, 255, 0.30)"
+_OVERLAY_PANEL_BORDER = "rgba(255, 255, 255, 0.58)"
 
 
 class _InlineConfig:
@@ -109,7 +115,7 @@ class PaymentOverlay(QWidget):
 
         # 壁纸相关
         self._wallpaper_pixmap = None
-        self._wallpaper_opacity = 0.58  # 提高壁纸存在感
+        self._wallpaper_opacity = 0.90
 
         self._init_ui()
         self.update_display(
@@ -126,21 +132,21 @@ class PaymentOverlay(QWidget):
         """初始化界面"""
         # 窗口属性：全屏、置顶、无边框
         self.setWindowFlags(
-            Qt.Window |  # 独立窗口
-            Qt.FramelessWindowHint |  # 无边框
-            Qt.WindowStaysOnTopHint |  # 置顶
-            Qt.Tool  # 不在任务栏显示
+            Qt.Window  # 独立窗口
+            | Qt.FramelessWindowHint  # 无边框
+            | Qt.WindowStaysOnTopHint  # 置顶
+            | Qt.Tool  # 不在任务栏显示
         )
         self.setWindowModality(Qt.ApplicationModal)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
+        self.setAutoFillBackground(True)
         self.setStyleSheet("color: white;")
 
         root_layout = QVBoxLayout(self)
         root_layout.setSpacing(0)
-        root_layout.setContentsMargins(48, 18, 48, 18)
+        root_layout.setContentsMargins(54, 20, 54, 20)
 
         shell = QFrame(self)
         shell.setObjectName("paymentShell")
@@ -148,7 +154,7 @@ class PaymentOverlay(QWidget):
             f"""
             QFrame#paymentShell {{
                 background-color: {_OVERLAY_CARD_BG};
-                border: 1px solid rgba(255, 255, 255, 168);
+                border: 1px solid rgba(255, 255, 255, 132);
                 border-radius: 32px;
             }}
             QFrame#paymentMetricPanel, QFrame#paymentQrPanel, QFrame#paymentTotalPanel {{
@@ -164,73 +170,73 @@ class PaymentOverlay(QWidget):
             shadow.setOffset(0, 20)
             shadow.setColor(QColor(0, 0, 0, 110))
             shell.setGraphicsEffect(shadow)
-        shell.setMinimumHeight(940)
+        shell.setMinimumHeight(1030)
         root_layout.addWidget(shell, alignment=Qt.AlignCenter)
 
         layout = QVBoxLayout(shell)
-        layout.setSpacing(30)
-        layout.setContentsMargins(42, 36, 42, 40)
+        layout.setSpacing(32)
+        layout.setContentsMargins(46, 40, 46, 44)
         self._content_layout = layout
 
         eyebrow = QLabel("AUTO BILLING · 自助修图计费")
         eyebrow.setAlignment(Qt.AlignCenter)
-        eyebrow.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        eyebrow.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
         eyebrow.setStyleSheet("color: #4b74c6; letter-spacing: 1px;")
         layout.addWidget(eyebrow)
 
         title_label = QLabel("请先完成本次付费")
-        title_label.setFont(QFont("Microsoft YaHei", 34, QFont.Bold))
+        title_label.setFont(QFont("Microsoft YaHei", 48, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
         title_label.setStyleSheet("color: #18263a;")
         layout.addWidget(title_label)
 
         subtitle = QLabel("收费确认后，系统会恢复导出操作。")
-        subtitle.setFont(QFont("Microsoft YaHei", 16))
+        subtitle.setFont(QFont("Microsoft YaHei", 24))
         subtitle.setAlignment(Qt.AlignCenter)
         subtitle.setStyleSheet("color: rgba(24, 38, 58, 0.72);")
         layout.addWidget(subtitle)
 
         body_layout = QHBoxLayout()
-        body_layout.setSpacing(22)
+        body_layout.setSpacing(28)
 
         info_panel = QFrame()
         info_panel.setObjectName("paymentMetricPanel")
         info_panel_layout = QVBoxLayout(info_panel)
-        info_panel_layout.setSpacing(18)
-        info_panel_layout.setContentsMargins(24, 24, 24, 30)
+        info_panel_layout.setSpacing(20)
+        info_panel_layout.setContentsMargins(30, 30, 30, 34)
 
         info_title = QLabel("本次费用明细")
-        info_title.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+        info_title.setFont(QFont("Microsoft YaHei", 26, QFont.Bold))
         info_title.setStyleSheet("color: #233247;")
         info_panel_layout.addWidget(info_title)
 
         self._time_label = QLabel("使用时长：--")
-        self._time_label.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
+        self._time_label.setFont(QFont("Microsoft YaHei", 36, QFont.Bold))
         self._time_label.setStyleSheet("color: #18263a;")
         info_panel_layout.addWidget(self._time_label)
 
         self._rate_label = QLabel("计时单价：-- 元/分钟")
-        self._rate_label.setFont(QFont("Microsoft YaHei", 18))
+        self._rate_label.setFont(QFont("Microsoft YaHei", 26))
         self._rate_label.setStyleSheet("color: rgba(24, 38, 58, 0.78);")
         info_panel_layout.addWidget(self._rate_label)
 
         self._time_amount_label = QLabel("计时费用：¥ 0.00")
-        self._time_amount_label.setFont(QFont("Microsoft YaHei", 18))
+        self._time_amount_label.setFont(QFont("Microsoft YaHei", 26))
         self._time_amount_label.setStyleSheet("color: #2d6fbe;")
         info_panel_layout.addWidget(self._time_amount_label)
 
         self._export_count_label = QLabel("导出张数：0 张")
-        self._export_count_label.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
+        self._export_count_label.setFont(QFont("Microsoft YaHei", 36, QFont.Bold))
         self._export_count_label.setStyleSheet("color: #18263a;")
         info_panel_layout.addWidget(self._export_count_label)
 
         self._export_rate_label = QLabel("单张导出单价：¥ 0.00 元/张")
-        self._export_rate_label.setFont(QFont("Microsoft YaHei", 18))
+        self._export_rate_label.setFont(QFont("Microsoft YaHei", 26))
         self._export_rate_label.setStyleSheet("color: rgba(24, 38, 58, 0.78);")
         info_panel_layout.addWidget(self._export_rate_label)
 
         self._export_amount_label = QLabel("导出费用：¥ 0.00")
-        self._export_amount_label.setFont(QFont("Microsoft YaHei", 18))
+        self._export_amount_label.setFont(QFont("Microsoft YaHei", 26))
         self._export_amount_label.setStyleSheet("color: #2d6fbe;")
         info_panel_layout.addWidget(self._export_amount_label)
 
@@ -241,46 +247,46 @@ class PaymentOverlay(QWidget):
         total_panel_layout.setSpacing(8)
 
         total_hint = QLabel("当前应付")
-        total_hint.setFont(QFont("Microsoft YaHei", 14))
+        total_hint.setFont(QFont("Microsoft YaHei", 20))
         total_hint.setStyleSheet("color: rgba(24, 38, 58, 0.56);")
         total_panel_layout.addWidget(total_hint)
 
         self._amount_label = QLabel("合计金额：¥ --")
-        self._amount_label.setFont(QFont("Microsoft YaHei", 30, QFont.Bold))
+        self._amount_label.setFont(QFont("Microsoft YaHei", 48, QFont.Bold))
         self._amount_label.setStyleSheet("color: #f39b2f;")
         total_panel_layout.addWidget(self._amount_label)
         info_panel_layout.addWidget(total_panel)
 
         hint_label = QLabel("请扫码支付，支付完成后由管理员确认。")
-        hint_label.setFont(QFont("Microsoft YaHei", 15))
+        hint_label.setFont(QFont("Microsoft YaHei", 22))
         hint_label.setStyleSheet("color: rgba(24, 38, 58, 0.68);")
         hint_label.setWordWrap(True)
         info_panel_layout.addWidget(hint_label)
         info_panel_layout.addStretch()
-        info_panel.setMinimumHeight(620)
+        info_panel.setMinimumHeight(720)
 
         body_layout.addWidget(info_panel, stretch=3)
 
         qr_panel = QFrame()
         qr_panel.setObjectName("paymentQrPanel")
         qr_layout = QVBoxLayout(qr_panel)
-        qr_layout.setSpacing(16)
-        qr_layout.setContentsMargins(26, 24, 26, 30)
+        qr_layout.setSpacing(18)
+        qr_layout.setContentsMargins(30, 30, 30, 34)
 
         qr_title = QLabel("扫码完成支付")
-        qr_title.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+        qr_title.setFont(QFont("Microsoft YaHei", 26, QFont.Bold))
         qr_title.setStyleSheet("color: #233247;")
         qr_title.setAlignment(Qt.AlignCenter)
         qr_layout.addWidget(qr_title)
 
         qr_subtitle = QLabel("支持微信 / 支付宝")
-        qr_subtitle.setFont(QFont("Microsoft YaHei", 14))
+        qr_subtitle.setFont(QFont("Microsoft YaHei", 21))
         qr_subtitle.setStyleSheet("color: rgba(24, 38, 58, 0.6);")
         qr_subtitle.setAlignment(Qt.AlignCenter)
         qr_layout.addWidget(qr_subtitle)
 
         self._wechat_qr_label = QLabel()
-        self._wechat_qr_label.setFixedSize(210, 210)
+        self._wechat_qr_label.setFixedSize(230, 230)
         self._wechat_qr_label.setStyleSheet(
             """
             background-color: rgba(255, 255, 255, 0.98);
@@ -293,7 +299,7 @@ class PaymentOverlay(QWidget):
         self._wechat_qr_label.setScaledContents(True)
 
         self._alipay_qr_label = QLabel()
-        self._alipay_qr_label.setFixedSize(210, 210)
+        self._alipay_qr_label.setFixedSize(230, 230)
         self._alipay_qr_label.setStyleSheet(
             """
             background-color: rgba(255, 255, 255, 0.98);
@@ -309,16 +315,16 @@ class PaymentOverlay(QWidget):
             slot = QFrame()
             slot.setStyleSheet(
                 """
-                background-color: rgba(255, 255, 255, 0.28);
-                border: 1px solid rgba(255, 255, 255, 0.55);
+                background-color: rgba(255, 255, 255, 0.22);
+                border: 1px solid rgba(255, 255, 255, 0.46);
                 border-radius: 18px;
                 """
             )
             slot_layout = QVBoxLayout(slot)
-            slot_layout.setSpacing(10)
-            slot_layout.setContentsMargins(12, 14, 12, 14)
+            slot_layout.setSpacing(12)
+            slot_layout.setContentsMargins(14, 16, 14, 16)
             slot_title = QLabel(title)
-            slot_title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+            slot_title.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
             slot_title.setAlignment(Qt.AlignCenter)
             slot_title.setStyleSheet("color: #233247;")
             slot_layout.addWidget(slot_title)
@@ -326,18 +332,18 @@ class PaymentOverlay(QWidget):
             return slot
 
         qr_slots = QVBoxLayout()
-        qr_slots.setSpacing(12)
+        qr_slots.setSpacing(14)
         qr_slots.addWidget(_build_qr_slot("微信支付", self._wechat_qr_label))
         qr_slots.addWidget(_build_qr_slot("支付宝", self._alipay_qr_label))
         qr_layout.addLayout(qr_slots)
 
         qr_footer = QLabel("付款完成后请交由店员确认")
-        qr_footer.setFont(QFont("Microsoft YaHei", 13))
+        qr_footer.setFont(QFont("Microsoft YaHei", 20))
         qr_footer.setStyleSheet("color: rgba(24, 38, 58, 0.58);")
         qr_footer.setAlignment(Qt.AlignCenter)
         qr_layout.addWidget(qr_footer)
         qr_layout.addStretch()
-        qr_panel.setMinimumHeight(620)
+        qr_panel.setMinimumHeight(720)
 
         body_layout.addWidget(qr_panel, stretch=2)
         layout.addLayout(body_layout)
@@ -346,16 +352,16 @@ class PaymentOverlay(QWidget):
         btn_layout.addStretch()
 
         self._confirm_btn = QPushButton("已付款 · 确认收款")
-        self._confirm_btn.setFont(QFont("Microsoft YaHei", 22, QFont.Bold))
-        self._confirm_btn.setFixedSize(680, 92)
+        self._confirm_btn.setFont(QFont("Microsoft YaHei", 32, QFont.Bold))
+        self._confirm_btn.setFixedSize(880, 118)
         self._confirm_btn.setStyleSheet(
             """
             QPushButton {
                 background-color: #f6b03d;
                 color: #1b1f27;
                 border: none;
-                border-radius: 18px;
-                padding: 14px 34px;
+                border-radius: 20px;
+                padding: 16px 40px;
             }
             QPushButton:hover { background-color: #ffc45b; }
             QPushButton:pressed { background-color: #e4a23a; }
@@ -366,7 +372,7 @@ class PaymentOverlay(QWidget):
         layout.addLayout(btn_layout)
 
         footer = QLabel("支付前将暂停导出，避免未付款先导出图片。")
-        footer.setFont(QFont("Microsoft YaHei", 14))
+        footer.setFont(QFont("Microsoft YaHei", 20))
         footer.setStyleSheet("color: rgba(24, 38, 58, 0.56);")
         footer.setAlignment(Qt.AlignCenter)
         layout.addWidget(footer)
@@ -388,7 +394,9 @@ class PaymentOverlay(QWidget):
         :param lock_targets: 需要统一锁定的窗口句柄列表
         """
         # 更新显示
-        self.update_display(minutes, rate, export_count=export_count, export_rate=export_rate)
+        self.update_display(
+            minutes, rate, export_count=export_count, export_rate=export_rate
+        )
         self._payment_completion_emitted = False
 
         # 通过全屏置顶遮罩层阻断操作，避免直接禁用外部窗口导致异常退出后残留不可点击状态
@@ -400,8 +408,8 @@ class PaymentOverlay(QWidget):
         # 刷新壁纸（配置可能已更新）
         self._load_wallpaper()
 
-        # 全屏显示
-        self.show()
+        # 全屏显示（showFullScreen 比 show 更可靠，兼容多屏/高分屏环境）
+        self.showFullScreen()
         self.raise_()
         self.activateWindow()
         self._confirm_btn.setFocus()
@@ -426,10 +434,26 @@ class PaymentOverlay(QWidget):
         self._time_label.setText(f"使用时长：{details['duration_minutes']} 分钟")
         self._rate_label.setText(f"计时单价：¥ {details['rate']:.2f} 元/分钟")
         self._export_count_label.setText(f"导出张数：{details['export_count']} 张")
-        self._export_rate_label.setText(f"单张导出单价：¥ {details['export_rate']:.2f} 元/张")
+        self._export_rate_label.setText(
+            f"单张导出单价：¥ {details['export_rate']:.2f} 元/张"
+        )
         self._time_amount_label.setText(f"计时费用：¥ {details['time_total']:.2f}")
         self._export_amount_label.setText(f"导出费用：¥ {details['export_total']:.2f}")
         self._amount_label.setText(f"合计金额：¥ {details['total']:.2f}")
+
+    def set_counting_status(self, counting: bool):
+        """切换导出张数标签为'正在统计张数...'或恢复正常显示。"""
+        if counting:
+            self._export_count_label.setText("导出张数：正在统计...")
+            self._export_count_label.setStyleSheet("color: #888;")
+            self._export_amount_label.setText("导出费用：计算中...")
+            self._amount_label.setText("合计金额：计算中...")
+            self._confirm_btn.setEnabled(False)
+            self._confirm_btn.setText("正在统计张数...")
+        else:
+            self._export_count_label.setStyleSheet("color: #18263a;")
+            self._confirm_btn.setEnabled(True)
+            self._confirm_btn.setText("已付款 · 确认收款")
 
     def _lock_windows(self, handles: list[int]):
         """锁定像素蛋糕相关窗口，防止收费前继续操作。"""
@@ -473,9 +497,7 @@ class PaymentOverlay(QWidget):
             pixmap = QPixmap(wechat_path)
             if not pixmap.isNull():
                 scaled = pixmap.scaled(
-                    184, 184,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
+                    204, 204, Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
                 self._wechat_qr_label.setPixmap(scaled)
                 loaded = True
@@ -484,9 +506,7 @@ class PaymentOverlay(QWidget):
             pixmap = QPixmap(alipay_path)
             if not pixmap.isNull():
                 scaled = pixmap.scaled(
-                    184, 184,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
+                    204, 204, Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
                 self._alipay_qr_label.setPixmap(scaled)
                 loaded = True
@@ -518,9 +538,7 @@ class PaymentOverlay(QWidget):
 
         if self._wallpaper_pixmap and not self._wallpaper_pixmap.isNull():
             scaled_wp = self._wallpaper_pixmap.scaled(
-                self.size(),
-                Qt.KeepAspectRatioByExpanding,
-                Qt.SmoothTransformation
+                self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
             )
             x = (scaled_wp.width() - self.width()) // 2
             y = (scaled_wp.height() - self.height()) // 2
@@ -530,9 +548,9 @@ class PaymentOverlay(QWidget):
             painter.setOpacity(1.0)
 
         gradient = QLinearGradient(0, 0, self.width(), self.height())
-        gradient.setColorAt(0.0, QColor(255, 255, 255, 30))
-        gradient.setColorAt(0.45, QColor(214, 225, 244, 42))
-        gradient.setColorAt(1.0, QColor(202, 214, 230, 62))
+        gradient.setColorAt(0.0, QColor(235, 241, 251, 92))
+        gradient.setColorAt(0.45, QColor(214, 225, 244, 78))
+        gradient.setColorAt(1.0, QColor(245, 240, 225, 98))
         painter.fillRect(self.rect(), gradient)
 
         painter.end()
@@ -540,11 +558,12 @@ class PaymentOverlay(QWidget):
 
     def _show_placeholder_qr(self):
         """显示收款码占位图"""
+
         def _placeholder(text: str) -> QPixmap:
-            pixmap = QPixmap(184, 184)
+            pixmap = QPixmap(204, 204)
             pixmap.fill(QColor(255, 255, 255))
             painter = QPainter(pixmap)
-            painter.setFont(QFont("Microsoft YaHei", 14))
+            painter.setFont(QFont("Microsoft YaHei", 18))
             painter.setPen(QColor(150, 150, 150))
             painter.drawText(pixmap.rect(), Qt.AlignCenter, text)
             painter.end()
@@ -578,9 +597,9 @@ class PaymentOverlay(QWidget):
         self.payment_completed.emit()
 
     def showEvent(self, event):
-        """确保通过任意方式显示时都铺满主屏幕。"""
+        """确保窗口始终铺满主屏幕。"""
         screen = QApplication.primaryScreen()
-        if screen:
+        if screen and not self.isFullScreen():
             self.setGeometry(screen.availableGeometry())
         super().showEvent(event)
 

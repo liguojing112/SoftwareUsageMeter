@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "process_name": "PixCake.exe",  # 像素蛋糕进程名
     "export_window_keywords": ["导出", "Export"],  # 导出窗口关键词
     "monitor_interval_ms": 2000,  # 进程监控间隔（毫秒）
+    "debug_mode": False,  # 调试模式（启用后会记录更详细的日志）
 }
 
 
@@ -124,3 +125,7 @@ class ConfigManager:
     @property
     def monitor_interval_ms(self) -> int:
         return int(self._config.get("monitor_interval_ms", 2000))
+
+    @property
+    def debug_mode(self) -> bool:
+        return bool(self._config.get("debug_mode", False))

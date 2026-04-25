@@ -37,12 +37,12 @@ ENABLE_UI_SHADOWS = not getattr(sys, "frozen", False)
 from config_manager import hash_password, verify_password
 
 # 管理面板表单行：统一增高输入行，避免控件显得过扁过挤
-_FORM_INPUT_MIN_HEIGHT = 90
-_FORM_LABEL_MIN_WIDTH = 220  # 增加标签宽度
-_FORM_FONT = QFont("Microsoft YaHei", 14)
+_FORM_INPUT_MIN_HEIGHT = 200
+_FORM_LABEL_MIN_WIDTH = 420  # 增加标签宽度
+_FORM_FONT = QFont("Microsoft YaHei", 36)
 _WINDOW_FALLBACK_BG = "#16202a"
-_CARD_BG = "rgba(248, 250, 252, 204)"
-_CARD_BORDER = "rgba(255, 255, 255, 110)"
+_CARD_BG = "rgba(248, 250, 252, 176)"
+_CARD_BORDER = "rgba(255, 255, 255, 150)"
 
 
 def _primary_button_css() -> str:
@@ -51,8 +51,8 @@ def _primary_button_css() -> str:
             background-color: #f6b03d;
             color: #1a2432;
             border: none;
-            border-radius: 12px;
-            padding: 14px 28px;
+            border-radius: 14px;
+            padding: 18px 34px;
             font-weight: 700;
         }
         QPushButton:hover { background-color: #ffc45b; }
@@ -66,8 +66,8 @@ def _secondary_button_css() -> str:
             background-color: rgba(15, 23, 42, 0.06);
             color: #2d3c4d;
             border: 1px solid rgba(61, 90, 128, 0.18);
-            border-radius: 12px;
-            padding: 12px 22px;
+            border-radius: 14px;
+            padding: 16px 28px;
         }
         QPushButton:hover { background-color: rgba(15, 23, 42, 0.1); }
         QPushButton:pressed { background-color: rgba(15, 23, 42, 0.16); }
@@ -78,9 +78,9 @@ def _apply_card_shadow(widget: QWidget) -> None:
     if not ENABLE_UI_SHADOWS:
         return
     shadow = QGraphicsDropShadowEffect(widget)
-    shadow.setBlurRadius(30)
-    shadow.setOffset(0, 14)
-    shadow.setColor(QColor(0, 0, 0, 54))
+    shadow.setBlurRadius(34)
+    shadow.setOffset(0, 16)
+    shadow.setColor(QColor(0, 0, 0, 60))
     widget.setGraphicsEffect(shadow)
 
 
@@ -127,11 +127,11 @@ def _update_wallpaper_label(
 def _form_row_label(text: str) -> QLabel:
     """表单左侧标签：与输入框同高，留出足够列宽，避免整行显得过窄。"""
     label = QLabel(text)
-    label.setFont(QFont("Microsoft YaHei", 14))
+    label.setFont(QFont("Microsoft YaHei", 42))
     label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
     label.setMinimumHeight(_FORM_INPUT_MIN_HEIGHT)
     label.setMinimumWidth(_FORM_LABEL_MIN_WIDTH)
-    label.setStyleSheet("color: #37474f; padding: 8px 14px 8px 8px;")
+    label.setStyleSheet("color: #37474f; padding: 18px 29px 18px 14px;")
     return label
 
 
@@ -140,10 +140,10 @@ def _apply_form_control_style(widget: QWidget) -> None:
     widget.setMinimumHeight(_FORM_INPUT_MIN_HEIGHT)
     widget.setStyleSheet(
         """
-        padding: 8px 14px;
-        border-radius: 12px;
+        padding: 25px 36px;
+        border-radius: 25px;
         border: 1px solid rgba(69, 90, 100, 0.18);
-        background-color: rgba(255, 255, 255, 0.78);
+        background-color: rgba(255, 255, 255, 0.66);
         selection-background-color: #2c7be5;
         """
     )
@@ -189,8 +189,15 @@ class PasswordDialog(QDialog):
 
     def _init_ui(self):
         self.setWindowTitle("管理员验证")
-        self.setFixedSize(700, 560)  # 继续增加垂直空间，避免标题和按钮区域过挤
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        # 与“计时计费 - 状态”窗口保持一致，避免移动/跨屏后重新布局变形。
+        self.resize(1920, 1280)
+        self.setMinimumSize(1600, 1100)
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.WindowStaysOnTopHint
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
         self.setObjectName("PasswordDialogRoot")
         self.setStyleSheet(
             f"""
@@ -200,7 +207,7 @@ class PasswordDialog(QDialog):
             QFrame#PasswordDialogCard {{
                 background-color: {_CARD_BG};
                 border: 1px solid {_CARD_BORDER};
-                border-radius: 20px;
+                border-radius: 50px;
             }}
             """
         )
@@ -209,83 +216,84 @@ class PasswordDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setSpacing(0)
-        layout.setContentsMargins(28, 24, 28, 34)
+        layout.setContentsMargins(44, 44, 44, 44)
 
         card = QFrame(self)
         card.setObjectName("PasswordDialogCard")
         _apply_card_shadow(card)
         card_layout = QVBoxLayout(card)
-        card_layout.setSpacing(20)
-        card_layout.setContentsMargins(38, 34, 38, 42)
+        card_layout.setSpacing(24)
+        card_layout.setContentsMargins(126, 76, 126, 78)
 
         eyebrow = QLabel("ADMIN ACCESS")
-        eyebrow.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        eyebrow.setFont(QFont("Microsoft YaHei", 32, QFont.Bold))
         eyebrow.setAlignment(Qt.AlignCenter)
+        eyebrow.setFixedHeight(64)
         eyebrow.setStyleSheet("color: #5d8cd8; letter-spacing: 1px;")
         card_layout.addWidget(eyebrow)
 
         title = QLabel("请输入管理员密码")
-        title.setFont(QFont("Microsoft YaHei", 20, QFont.Bold))
+        title.setFont(QFont("Microsoft YaHei", 72, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         title.setWordWrap(True)
-        title.setMinimumHeight(92)
-        title.setStyleSheet("padding: 12px 0 10px 0; color: #1d2a38;")
+        title.setFixedHeight(150)
+        title.setStyleSheet("color: #1d2a38;")
         card_layout.addWidget(title)
 
         subtitle = QLabel("验证通过后才能进入管理设置。")
-        subtitle.setFont(QFont("Microsoft YaHei", 12))
+        subtitle.setFont(QFont("Microsoft YaHei", 38))
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setMinimumHeight(44)
-        subtitle.setStyleSheet("color: #607080; padding: 0 0 10px 0;")
+        subtitle.setFixedHeight(76)
+        subtitle.setStyleSheet("color: #607080;")
         card_layout.addWidget(subtitle)
 
-        # 密码输入
+        card_layout.addSpacing(24)
+
         self._password_input = QLineEdit()
         self._password_input.setEchoMode(QLineEdit.Password)
         self._password_input.setPlaceholderText("请输入密码")
-        self._password_input.setFont(QFont("Microsoft YaHei", 14))
-        self._password_input.setMinimumHeight(98)
+        self._password_input.setFont(QFont("Microsoft YaHei", 46))
+        self._password_input.setFixedHeight(164)
         self._password_input.setStyleSheet(
             """
-            padding: 14px 20px;
-            border-radius: 12px;
+            padding: 22px 58px;
+            border-radius: 29px;
             border: 1px solid rgba(69, 90, 100, 0.18);
-            background-color: rgba(255, 255, 255, 0.72);
+            background-color: rgba(255, 255, 255, 0.62);
             """
         )
         self._password_input.returnPressed.connect(self._verify)
         card_layout.addWidget(self._password_input)
 
         self._status_label = QLabel("")
-        self._status_label.setFont(QFont("Microsoft YaHei", 13))  # 稍微增加字体大小
+        self._status_label.setFont(QFont("Microsoft YaHei", 34))
         self._status_label.setStyleSheet("""
-            color: #d32f2f; 
-            padding: 20px 0 20px 0;  /* 进一步增加内边距 */
+            color: #d32f2f;
+            padding: 0;
             margin: 0;
             border: none;
             background: transparent;
         """)
         self._status_label.setAlignment(Qt.AlignCenter)
-        self._status_label.setMinimumHeight(80)  # 确保错误提示出现时仍不挤压按钮
+        self._status_label.setFixedHeight(64)
         card_layout.addWidget(self._status_label)
 
-        card_layout.addSpacing(4)
+        card_layout.addStretch(1)
 
-        # 按钮
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(22)
-        btn_layout.setContentsMargins(0, 16, 0, 18)
+        btn_layout.setSpacing(50)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
         cancel_btn = QPushButton("取消")
-        cancel_btn.setFont(QFont("Microsoft YaHei", 14))
-        cancel_btn.setMinimumHeight(70)
-        cancel_btn.setMinimumWidth(150)
+        cancel_btn.setFont(QFont("Microsoft YaHei", 48))
+        cancel_btn.setFixedHeight(142)
+        cancel_btn.setMinimumWidth(468)
         cancel_btn.setStyleSheet(_secondary_button_css())
         cancel_btn.clicked.connect(self.reject)
 
         confirm_btn = QPushButton("确认")
-        confirm_btn.setFont(QFont("Microsoft YaHei", 14))
-        confirm_btn.setMinimumHeight(70)
-        confirm_btn.setMinimumWidth(150)
+        confirm_btn.setFont(QFont("Microsoft YaHei", 48))
+        confirm_btn.setFixedHeight(142)
+        confirm_btn.setMinimumWidth(468)
         confirm_btn.setDefault(True)
         confirm_btn.setStyleSheet(_primary_button_css())
         confirm_btn.clicked.connect(self._verify)
@@ -343,8 +351,8 @@ class AdminPanel(QDialog):
 
     def _init_ui(self):
         self.setWindowTitle("管理设置")
-        self.resize(1200, 820)
-        self.setMinimumSize(1100, 720)
+        self.resize(1920, 1280)
+        self.setMinimumSize(1600, 1100)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
         self.setObjectName("AdminPanelRoot")
         self.setStyleSheet(
@@ -355,18 +363,18 @@ class AdminPanel(QDialog):
             QFrame#AdminPanelCard {{
                 background-color: {_CARD_BG};
                 border: 1px solid {_CARD_BORDER};
-                border-radius: 20px;
+                border-radius: 24px;
             }}
             QScrollArea {{
                 background: transparent;
                 border: none;
             }}
             QGroupBox {{
-                background-color: rgba(255, 255, 255, 0.56);
+                background-color: rgba(255, 255, 255, 0.42);
                 border: 1px solid rgba(207, 216, 220, 0.7);
-                border-radius: 16px;
+                border-radius: 18px;
                 margin-top: 14px;
-                padding-top: 8px;
+                padding-top: 12px;
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -383,15 +391,15 @@ class AdminPanel(QDialog):
         self._wallpaper_label = _create_wallpaper_label(self)
 
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(18, 16, 18, 16)
+        root_layout.setContentsMargins(40, 36, 40, 36)
         root_layout.setSpacing(0)
 
         card = QFrame(self)
         card.setObjectName("AdminPanelCard")
         _apply_card_shadow(card)
         main_layout = QVBoxLayout(card)
-        main_layout.setContentsMargins(22, 22, 22, 18)
-        main_layout.setSpacing(14)
+        main_layout.setContentsMargins(50, 47, 50, 40)
+        main_layout.setSpacing(32)
         root_layout.addWidget(card)
 
         # 创建滚动区域
@@ -406,8 +414,8 @@ class AdminPanel(QDialog):
         content_widget.setAttribute(Qt.WA_StyledBackground, True)
         content_widget.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(content_widget)
-        layout.setSpacing(25)  # 减少间距，让布局更紧凑
-        layout.setContentsMargins(30, 32, 30, 32)
+        layout.setSpacing(54)  # 减少间距，让布局更紧凑
+        layout.setContentsMargins(50, 50, 50, 54)
 
         scroll_area.setWidget(content_widget)
 
@@ -416,29 +424,30 @@ class AdminPanel(QDialog):
         # 将按钮放在滚动区域之外，确保始终可见
         self._setup_bottom_buttons(main_layout)
 
+        # 管理设置 (AdminPanel)页面
         eyebrow = QLabel("ADMIN CONSOLE")
-        eyebrow.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        eyebrow.setFont(QFont("Microsoft YaHei", 32, QFont.Bold))
         eyebrow.setStyleSheet("color: #5d8cd8; letter-spacing: 1px;")
         layout.addWidget(eyebrow)
 
         title = QLabel("门店计时计费管理设置")
-        title.setFont(QFont("Microsoft YaHei", 26, QFont.Bold))
+        title.setFont(QFont("Microsoft YaHei", 76, QFont.Bold))
         title.setStyleSheet("color: #1d2a38;")
         layout.addWidget(title)
 
         summary = QLabel("设置会自动保存到本地配置文件，重启软件后继续生效。")
-        summary.setFont(QFont("Microsoft YaHei", 13))
-        summary.setStyleSheet("color: #607d8b; padding: 4px 0 18px 0;")
+        summary.setFont(QFont("Microsoft YaHei", 40))
+        summary.setStyleSheet("color: #607d8b; padding: 7px 0 32px 0;")
         layout.addWidget(summary)
 
         # === 计费设置 ===
         billing_group = QGroupBox("计费设置")
-        billing_group.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        billing_group.setFont(QFont("Microsoft YaHei", 40, QFont.Bold))
         billing_layout = QFormLayout()
-        billing_layout.setSpacing(40)  # 减少布局间距
-        billing_layout.setVerticalSpacing(50)  # 减少行间垂直间距
-        billing_layout.setHorizontalSpacing(24)
-        billing_layout.setContentsMargins(12, 26, 12, 22)
+        billing_layout.setSpacing(72)  # 减少布局间距
+        billing_layout.setVerticalSpacing(90)  # 减少行间垂直间距
+        billing_layout.setHorizontalSpacing(44)
+        billing_layout.setContentsMargins(22, 47, 22, 40)
         billing_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         billing_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
@@ -448,6 +457,7 @@ class AdminPanel(QDialog):
         self._rate_spin.setSuffix(" 元/分钟")
         self._rate_spin.setFont(_FORM_FONT)
         self._rate_spin.setSingleStep(0.5)
+        self._rate_spin.setMinimumWidth(540)
         _apply_form_control_style(self._rate_spin)
         billing_layout.addRow(_form_row_label("计时单价："), self._rate_spin)
         self._rate_input_adapter = _RateInputAdapter(self._rate_spin)
@@ -458,6 +468,7 @@ class AdminPanel(QDialog):
         self._export_rate_spin.setSuffix(" 元/张")
         self._export_rate_spin.setFont(_FORM_FONT)
         self._export_rate_spin.setSingleStep(0.5)
+        self._export_rate_spin.setMinimumWidth(540)
         _apply_form_control_style(self._export_rate_spin)
         billing_layout.addRow(_form_row_label("单张导出单价："), self._export_rate_spin)
         self._export_rate_input_adapter = _RateInputAdapter(self._export_rate_spin)
@@ -467,12 +478,12 @@ class AdminPanel(QDialog):
 
         # === 监控设置 ===
         monitor_group = QGroupBox("监控设置")
-        monitor_group.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        monitor_group.setFont(QFont("Microsoft YaHei", 40, QFont.Bold))
         monitor_layout = QFormLayout()
-        monitor_layout.setSpacing(40)  # 减少布局间距
-        monitor_layout.setVerticalSpacing(50)  # 减少行间垂直间距
-        monitor_layout.setHorizontalSpacing(24)
-        monitor_layout.setContentsMargins(12, 30, 12, 26)
+        monitor_layout.setSpacing(72)  # 减少布局间距
+        monitor_layout.setVerticalSpacing(90)  # 减少行间垂直间距
+        monitor_layout.setHorizontalSpacing(44)
+        monitor_layout.setContentsMargins(22, 54, 22, 47)
         monitor_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         monitor_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
@@ -494,6 +505,7 @@ class AdminPanel(QDialog):
         self._interval_spin.setSuffix(" 秒")
         self._interval_spin.setFont(_FORM_FONT)
         self._interval_spin.setSingleStep(0.5)
+        self._interval_spin.setMinimumWidth(540)
         _apply_form_control_style(self._interval_spin)
         monitor_layout.addRow(_form_row_label("检测间隔："), self._interval_spin)
 
@@ -502,24 +514,24 @@ class AdminPanel(QDialog):
 
         # === 收款码设置 ===
         qr_group = QGroupBox("收款码设置")
-        qr_group.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        qr_group.setFont(QFont("Microsoft YaHei", 40, QFont.Bold))
         qr_layout = QVBoxLayout()
-        qr_layout.setSpacing(40)  # 减少垂直间距
-        qr_layout.setContentsMargins(12, 30, 12, 26)
+        qr_layout.setSpacing(72)  # 减少垂直间距
+        qr_layout.setContentsMargins(22, 54, 22, 47)
 
         qr_hint = QLabel("支持分别上传微信和支付宝收款码；若只配置一张，收费弹窗会自动复用。")
-        qr_hint.setFont(QFont("Microsoft YaHei", 12))
+        qr_hint.setFont(QFont("Microsoft YaHei", 32))
         qr_hint.setStyleSheet("color: #5d6c7b;")
         qr_hint.setWordWrap(True)
         qr_layout.addWidget(qr_hint)
 
         wechat_title = QLabel("微信收款码")
-        wechat_title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        wechat_title.setFont(QFont("Microsoft YaHei", 36, QFont.Bold))
         wechat_title.setStyleSheet("color: #1f7a4d;")
         qr_layout.addWidget(wechat_title)
 
         wechat_path_layout = QHBoxLayout()
-        wechat_path_layout.setSpacing(12)
+        wechat_path_layout.setSpacing(22)
         self._wechat_qr_path_input = QLineEdit()
         self._wechat_qr_path_input.setFont(_FORM_FONT)
         self._wechat_qr_path_input.setPlaceholderText("选择微信收款码图片文件")
@@ -536,21 +548,21 @@ class AdminPanel(QDialog):
         qr_layout.addLayout(wechat_path_layout)
 
         self._wechat_qr_preview = QLabel()
-        self._wechat_qr_preview.setFixedSize(120, 120)
+        self._wechat_qr_preview.setFixedSize(252, 252)
         self._wechat_qr_preview.setStyleSheet(
-            "border: 1px solid rgba(69, 90, 100, 0.18); background: rgba(255,255,255,0.72); border-radius: 16px;"
+            "border: 1px solid rgba(69, 90, 100, 0.18); background: rgba(255,255,255,0.72); border-radius: 29px;"
         )
         self._wechat_qr_preview.setAlignment(Qt.AlignCenter)
         self._wechat_qr_preview.setScaledContents(True)
         qr_layout.addWidget(self._wechat_qr_preview, alignment=Qt.AlignCenter)
 
         alipay_title = QLabel("支付宝收款码")
-        alipay_title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        alipay_title.setFont(QFont("Microsoft YaHei", 36, QFont.Bold))
         alipay_title.setStyleSheet("color: #2166d1;")
         qr_layout.addWidget(alipay_title)
 
         alipay_path_layout = QHBoxLayout()
-        alipay_path_layout.setSpacing(12)
+        alipay_path_layout.setSpacing(22)
         self._alipay_qr_path_input = QLineEdit()
         self._alipay_qr_path_input.setFont(_FORM_FONT)
         self._alipay_qr_path_input.setPlaceholderText("选择支付宝收款码图片文件")
@@ -567,16 +579,16 @@ class AdminPanel(QDialog):
         qr_layout.addLayout(alipay_path_layout)
 
         self._alipay_qr_preview = QLabel()
-        self._alipay_qr_preview.setFixedSize(120, 120)
+        self._alipay_qr_preview.setFixedSize(252, 252)
         self._alipay_qr_preview.setStyleSheet(
-            "border: 1px solid rgba(69, 90, 100, 0.18); background: rgba(255,255,255,0.72); border-radius: 16px;"
+            "border: 1px solid rgba(69, 90, 100, 0.18); background: rgba(255,255,255,0.72); border-radius: 29px;"
         )
         self._alipay_qr_preview.setAlignment(Qt.AlignCenter)
         self._alipay_qr_preview.setScaledContents(True)
         qr_layout.addWidget(self._alipay_qr_preview, alignment=Qt.AlignCenter)
 
         qr_clear_btn = QPushButton("清除全部收款码（恢复默认显示）")
-        qr_clear_btn.setFont(QFont("Microsoft YaHei", 14))
+        qr_clear_btn.setFont(QFont("Microsoft YaHei", 36))
         qr_clear_btn.setMinimumHeight(_FORM_INPUT_MIN_HEIGHT)
         qr_clear_btn.setStyleSheet(_secondary_button_css())
         qr_clear_btn.clicked.connect(self._clear_qr_code)
@@ -590,13 +602,13 @@ class AdminPanel(QDialog):
 
         # === 壁纸设置 ===
         wp_group = QGroupBox("壁纸设置")
-        wp_group.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        wp_group.setFont(QFont("Microsoft YaHei", 40, QFont.Bold))
         wp_layout = QVBoxLayout()
-        wp_layout.setSpacing(40)
-        wp_layout.setContentsMargins(12, 30, 12, 26)
+        wp_layout.setSpacing(72)
+        wp_layout.setContentsMargins(22, 54, 22, 47)
 
         wp_path_layout = QHBoxLayout()
-        wp_path_layout.setSpacing(12)
+        wp_path_layout.setSpacing(22)
         self._wp_path_input = QLineEdit()
         self._wp_path_input.setFont(_FORM_FONT)
         self._wp_path_input.setPlaceholderText("选择壁纸图片文件（留空则使用纯色背景）")
@@ -614,7 +626,7 @@ class AdminPanel(QDialog):
 
         # 清除壁纸按钮
         wp_clear_btn = QPushButton("清除壁纸（恢复默认背景）")
-        wp_clear_btn.setFont(QFont("Microsoft YaHei", 14))
+        wp_clear_btn.setFont(QFont("Microsoft YaHei", 36))
         wp_clear_btn.setMinimumHeight(_FORM_INPUT_MIN_HEIGHT)
         wp_clear_btn.setStyleSheet(_secondary_button_css())
         wp_clear_btn.clicked.connect(self._clear_wallpaper)
@@ -622,9 +634,9 @@ class AdminPanel(QDialog):
 
         # 壁纸预览
         self._wp_preview = QLabel()
-        self._wp_preview.setFixedSize(200, 120)
+        self._wp_preview.setFixedSize(432, 252)
         self._wp_preview.setStyleSheet(
-            "border: 1px solid rgba(69, 90, 100, 0.18); background: rgba(255,255,255,0.88); border-radius: 16px;"
+            "border: 1px solid rgba(69, 90, 100, 0.18); background: rgba(255,255,255,0.88); border-radius: 29px;"
         )
         self._wp_preview.setAlignment(Qt.AlignCenter)
         self._wp_preview.setScaledContents(True)
@@ -635,12 +647,12 @@ class AdminPanel(QDialog):
 
         # === 密码修改 ===
         pwd_group = QGroupBox("修改管理员密码")
-        pwd_group.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        pwd_group.setFont(QFont("Microsoft YaHei", 40, QFont.Bold))
         pwd_layout = QFormLayout()
-        pwd_layout.setSpacing(40)  # 减少布局间距
-        pwd_layout.setVerticalSpacing(50)  # 减少行间垂直间距
-        pwd_layout.setHorizontalSpacing(24)
-        pwd_layout.setContentsMargins(12, 30, 12, 26)
+        pwd_layout.setSpacing(72)  # 减少布局间距
+        pwd_layout.setVerticalSpacing(90)  # 减少行间垂直间距
+        pwd_layout.setHorizontalSpacing(44)
+        pwd_layout.setContentsMargins(22, 54, 22, 47)
         pwd_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         pwd_layout.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
 
@@ -762,11 +774,11 @@ class AdminPanel(QDialog):
         """清除壁纸设置"""
         self._wp_path_input.clear()
         self._wp_preview.clear()
-        placeholder = QPixmap(200, 120)
+        placeholder = QPixmap(432, 252)
         placeholder.fill(QColor("#f5f5f5"))
         painter = QPainter(placeholder)
         painter.setPen(QColor("#9e9e9e"))
-        painter.setFont(QFont("Microsoft YaHei", 12))
+        painter.setFont(QFont("Microsoft YaHei", 22))
         painter.drawText(placeholder.rect(), Qt.AlignCenter, "无壁纸")
         painter.end()
         self._wp_preview.setPixmap(placeholder)
@@ -795,7 +807,7 @@ class AdminPanel(QDialog):
             pixmap = QPixmap(path)
             if not pixmap.isNull():
                 scaled = pixmap.scaled(
-                    110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    230, 230, Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
                 target_label.setPixmap(scaled)
                 return
@@ -806,10 +818,11 @@ class AdminPanel(QDialog):
     ):
         """显示收款码占位图（管理面板预览用）"""
         target_label.clear()
-        placeholder = QPixmap(110, 110)
+        placeholder = QPixmap(230, 230)
         placeholder.fill(QColor("#f5f5f5"))
         painter = QPainter(placeholder)
         painter.setPen(QColor("#9e9e9e"))
+        painter.setFont(QFont("Microsoft YaHei", 22))
         painter.drawText(placeholder.rect(), Qt.AlignCenter, empty_text)
         painter.end()
         target_label.setPixmap(placeholder)
@@ -820,7 +833,7 @@ class AdminPanel(QDialog):
             pixmap = QPixmap(path)
             if not pixmap.isNull():
                 scaled = pixmap.scaled(
-                    200, 120, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                    432, 252, Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
                 self._wp_preview.setPixmap(scaled)
                 return
@@ -828,11 +841,11 @@ class AdminPanel(QDialog):
         self._wp_preview.clear()
         from PyQt5.QtGui import QPainter, QColor
 
-        placeholder = QPixmap(200, 120)
+        placeholder = QPixmap(432, 252)
         placeholder.fill(QColor("#f5f5f5"))
         painter = QPainter(placeholder)
         painter.setPen(QColor("#9e9e9e"))
-        painter.setFont(QFont("Microsoft YaHei", 12))
+        painter.setFont(QFont("Microsoft YaHei", 22))
         painter.drawText(placeholder.rect(), Qt.AlignCenter, "无壁纸")
         painter.end()
         self._wp_preview.setPixmap(placeholder)
@@ -844,8 +857,8 @@ class AdminPanel(QDialog):
                 color: #166534;
                 background-color: rgba(34, 197, 94, 0.12);
                 border: 1px solid rgba(34, 197, 94, 0.2);
-                border-radius: 12px;
-                padding: 12px 16px;
+                border-radius: 22px;
+                padding: 22px 29px;
                 """
             )
         else:
@@ -854,8 +867,8 @@ class AdminPanel(QDialog):
                 color: #b42318;
                 background-color: rgba(255, 92, 92, 0.08);
                 border: 1px solid rgba(255, 92, 92, 0.16);
-                border-radius: 12px;
-                padding: 12px 16px;
+                border-radius: 22px;
+                padding: 22px 29px;
                 """
             )
         self._status_label.setText(message)
@@ -1019,37 +1032,37 @@ class AdminPanel(QDialog):
         # 状态标签
         self._status_label = QLabel("")
         self._status_label.setWordWrap(True)
-        self._status_label.setFont(QFont("Microsoft YaHei", 13))
+        self._status_label.setFont(QFont("Microsoft YaHei", 36))
         self._status_label.setStyleSheet(
             """
             color: #607d8b;
             background-color: rgba(15, 23, 42, 0.04);
             border: 1px dashed rgba(61, 90, 128, 0.18);
-            border-radius: 12px;
-            padding: 12px 16px;
+            border-radius: 25px;
+            padding: 25px 32px;
             """
         )
         main_layout.addWidget(self._status_label)
 
         # 按钮
         btn_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        btn_box.setFont(QFont("Microsoft YaHei", 14))
+        btn_box.setFont(QFont("Microsoft YaHei", 40))
         btn_box.accepted.connect(self._save)
         btn_box.rejected.connect(self.reject)
 
         # 设置保存按钮样式
         save_btn = btn_box.button(QDialogButtonBox.Save)
         save_btn.setText("保存设置")
-        save_btn.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
-        save_btn.setMinimumHeight(102)
-        save_btn.setMinimumWidth(190)
+        save_btn.setFont(QFont("Microsoft YaHei", 42, QFont.Bold))
+        save_btn.setMinimumHeight(150)
+        save_btn.setMinimumWidth(320)
         save_btn.setStyleSheet(_primary_button_css())
         cancel_panel_btn = btn_box.button(QDialogButtonBox.Cancel)
         if cancel_panel_btn is not None:
             cancel_panel_btn.setText("取消设置")  # 设置按钮文本
-            cancel_panel_btn.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
-            cancel_panel_btn.setMinimumHeight(102)
-            cancel_panel_btn.setMinimumWidth(190)
+            cancel_panel_btn.setFont(QFont("Microsoft YaHei", 42, QFont.Bold))
+            cancel_panel_btn.setMinimumHeight(150)
+            cancel_panel_btn.setMinimumWidth(320)
             cancel_panel_btn.setStyleSheet(_secondary_button_css())
         self._save_button = save_btn
 
