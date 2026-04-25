@@ -11,6 +11,7 @@
 
 import os
 import sys
+import logging
 
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QPixmap, QPainter, QColor
@@ -35,6 +36,8 @@ from PyQt5.QtWidgets import (
 ENABLE_UI_SHADOWS = not getattr(sys, "frozen", False)
 
 from config_manager import hash_password, verify_password
+
+logger = logging.getLogger(__name__)
 
 # 管理面板表单行：统一增高输入行，避免控件显得过扁过挤
 _FORM_INPUT_MIN_HEIGHT = 200
@@ -309,11 +312,30 @@ class PasswordDialog(QDialog):
     def _verify(self):
         """验证密码"""
         password = self._password_input.text()
+        config_path = getattr(self._config, "config_path", "")
+        if hasattr(self._config, "reload"):
+            try:
+                self._config.reload()
+                config_path = getattr(self._config, "config_path", config_path)
+            except Exception:
+                logger.exception("管理员密码验证前重新加载配置失败: config_path=%s", config_path)
+
         if verify_password(password, self._config.admin_password):
+            logger.info(
+                "管理员密码验证通过: config_path=%s, hash_prefix=%s",
+                config_path,
+                self._config.admin_password[:8],
+            )
             self._authenticated = True
             self._status_label.clear()
             self.accept()
         else:
+            logger.warning(
+                "管理员密码验证失败: config_path=%s, input_len=%s, hash_prefix=%s",
+                config_path,
+                len(password or ""),
+                self._config.admin_password[:8],
+            )
             self._password_input.clear()
             self._status_label.setText("密码错误，请重试。")
 

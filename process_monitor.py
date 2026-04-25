@@ -66,6 +66,8 @@ EXPORT_PROCESS_MARKERS = [
 
 EXPORT_WINDOW_TITLE_EXCLUDES = [
     "确认删除该导出进度",
+    "导出至创意",
+    "至创意",
 ]
 
 LOCK_WINDOW_TITLE_EXCLUDES = [
@@ -96,6 +98,7 @@ EXPORT_DEBUG_MAX_BUNDLES = 12
 EXPORT_DEBUG_DIRNAME = "debug_export_captures"
 FAST_SUMMARY_OCR_TIMEOUT_SECONDS = 0.9
 WINDOWS_OCR_TIMEOUT_SECONDS = 2.0
+CREATIVE_TRANSFER_SUMMARY_SENTINEL = -1001
 CENTERED_DIALOG_SCAN_REGIONS = [
     (0.15, 0.12, 0.48, 0.25),
     (0.10, 0.08, 0.55, 0.32),
@@ -117,6 +120,25 @@ CREATIVE_SELECTION_CONTEXT_KEYWORDS = [
     "创意模块",
     "导出选择图",
     "导出当前图",
+]
+CREATIVE_TRANSFER_CONTEXT_KEYWORDS = [
+    "导出至创意",
+    "至创意",
+    "创意模块",
+    "导出选择图",
+    "导出当前图",
+    "精修导出至创意",
+]
+LOCAL_EXPORT_ONLY_CONTEXT_KEYWORDS = [
+    "快速导出",
+    "指定文件夹",
+    "图片格式",
+    "质量",
+    "jpg",
+    "jpeg",
+    "png",
+    "自定义设置",
+    "上传至选片交付",
 ]
 EXPORT_BUTTON_TEXT_KEYWORDS = [
     "导出",
@@ -504,6 +526,67 @@ def image_matches_export_visual_state(image: Image.Image) -> bool:
     return locate_export_button_bounds(image) is not None
 
 
+def looks_like_creative_transfer_layout(
+    image: Image.Image | None,
+    button_bounds: tuple[int, int, int, int] | None,
+) -> bool:
+    """用纯视觉结构判断是否是“导出至创意”中转框。
+
+    创意中转框在黄色按钮上方有一整块深色统计面板（原图/精修图），
+    本地导出框则是文件夹、格式、质量等表单项。这个判断不跑 OCR，
+    用来在热路径里快速挡掉“导出至创意”的误触发。
+    """
+    if image is None or button_bounds is None:
+        return False
+
+    try:
+        image = image.convert("RGB")
+        width, height = image.size
+        bx1, by1, bx2, by2 = button_bounds
+        button_width = max(bx2 - bx1, 1)
+        button_height = max(by2 - by1, 1)
+
+        left = max(int(bx1 - button_width * 4.8), 0)
+        right = min(int(bx2 + button_width * 0.2), width)
+        top = max(int(by1 - button_height * 7.0), 0)
+        bottom = max(int(by1 - button_height * 3.0), top + 1)
+        bottom = min(bottom, height)
+        if right - left < button_width * 2.2 or bottom - top < button_height * 1.2:
+            return False
+
+        crop = ImageOps.grayscale(image.crop((left, top, right, bottom)))
+        if crop.width > 360:
+            scale = 360 / crop.width
+            crop = crop.resize(
+                (360, max(int(crop.height * scale), 1)), RESAMPLING_LANCZOS
+            )
+
+        max_dark_run = 0
+        dark_run = 0
+        row_width = max(crop.width, 1)
+        for y in range(crop.height):
+            row = [crop.getpixel((x, y)) for x in range(row_width)]
+            dark_ratio = sum(1 for value in row if value <= 42) / row_width
+            if dark_ratio >= 0.62:
+                dark_run += 1
+                max_dark_run = max(max_dark_run, dark_run)
+            else:
+                dark_run = 0
+
+        is_creative_layout = max_dark_run >= max(10, int(crop.height * 0.28))
+        if is_creative_layout:
+            logger.info(
+                "视觉结构识别为导出至创意中转页: button_bounds=%s, dark_run=%s, crop_size=%s",
+                button_bounds,
+                max_dark_run,
+                crop.size,
+            )
+        return is_creative_layout
+    except Exception:
+        logger.debug("导出至创意结构判断失败", exc_info=True)
+        return False
+
+
 def locate_export_button_bounds(
     image: Image.Image,
 ) -> tuple[int, int, int, int] | None:
@@ -752,6 +835,9 @@ def contains_export_page_context(text: str) -> bool:
     if not compact:
         return False
 
+    if contains_creative_transfer_context(compact):
+        return False
+
     has_local_export_context = any(
         keyword in compact for keyword in EXPORT_COUNT_CONTEXT_KEYWORDS
     )
@@ -771,10 +857,51 @@ def contains_export_page_context(text: str) -> bool:
     return bool(re.search(r"(精修|免费|原图)[^0-9]{0,8}[（(]?\d+[）)]?", compact))
 
 
+def contains_creative_transfer_context(text: str) -> bool:
+    """判断 OCR 文本是否属于“导出至创意”的中转页。
+
+    该页面只是把图片送入创意模块，真正需要计费的是进入创意后的
+    “导出至本地”对话框，所以这里必须在收费触发前排除。
+    """
+    compact = normalize_ocr_text(text)
+    if not compact:
+        return False
+
+    compact_lower = compact.lower()
+    has_creative_context = any(
+        keyword in compact for keyword in CREATIVE_TRANSFER_CONTEXT_KEYWORDS
+    )
+    if not has_creative_context:
+        has_creative_context = bool(
+            "创意" in compact
+            and (
+                "选图" in compact
+                or "当前图" in compact
+                or ("原图" in compact and "精修图" in compact)
+            )
+        )
+    if not has_creative_context:
+        # 部分机器 OCR 会把“创意模块/精修图”识别成乱码，但“选图 + 原图”
+        # 这组结构仍然能稳定区别于本地导出页。
+        has_creative_context = "选图" in compact and (
+            "原图" in compact or "当前图" in compact or "前图" in compact
+        )
+    if not has_creative_context:
+        return False
+
+    has_local_export_context = any(
+        keyword.lower() in compact_lower for keyword in LOCAL_EXPORT_ONLY_CONTEXT_KEYWORDS
+    )
+    return not has_local_export_context
+
+
 def contains_export_button_text(text: str) -> bool:
     """判断按钮 OCR 文本是否像“导出”按钮。"""
     compact = normalize_ocr_text(text).lower()
     if not compact:
+        return False
+
+    if contains_creative_transfer_context(compact):
         return False
 
     return any(keyword in compact for keyword in EXPORT_BUTTON_TEXT_KEYWORDS)
@@ -941,6 +1068,10 @@ def extract_export_image_count_from_text(
     if not compact:
         return None
 
+    if contains_creative_transfer_context(compact):
+        logger.info("忽略导出至创意中转页张数: text=%s", compact[:120])
+        return None
+
     has_export_context = contains_export_page_context(compact)
 
     # 尝试多种匹配模式
@@ -1002,6 +1133,10 @@ def extract_export_summary_count_from_text(text: str) -> int | None:
     """只针对左上角摘要文案提取导出张数，避免被分类区和路径区带偏。"""
     compact = normalize_ocr_text(text)
     if not compact:
+        return None
+
+    if contains_creative_transfer_context(compact):
+        logger.info("忽略导出至创意摘要张数: text=%s", compact[:120])
         return None
 
     patterns = [
@@ -1087,6 +1222,7 @@ def detect_export_summary_count_from_image(
     dialog_mode: bool = False,
     button_bounds: tuple[int, int, int, int] | None = None,
     fast_mode: bool = False,
+    return_creative_sentinel: bool = False,
 ) -> int | None:
     """优先从导出页左上角摘要区识别张数。"""
     if image is None:
@@ -1137,6 +1273,16 @@ def detect_export_summary_count_from_image(
                     os.remove(temp_path)
                 except OSError:
                     pass
+
+        if contains_creative_transfer_context(ocr_text):
+            logger.info(
+                "左上角摘要识别为导出至创意中转页: variant=%s, text=%s",
+                variant_name,
+                normalize_ocr_text(ocr_text)[:120],
+            )
+            if return_creative_sentinel:
+                return CREATIVE_TRANSFER_SUMMARY_SENTINEL
+            continue
 
         export_count = extract_export_summary_count_from_text(ocr_text)
         if export_count is not None:
@@ -1677,8 +1823,12 @@ class ProcessMonitor(QThread):
         self._export_page_context_active = False
         self._export_page_context_checked_at = 0.0
         self._export_page_context_hwnd = None
+        self._creative_transfer_context_active = False
+        self._creative_transfer_ignore_worker_until = 0.0
         self._last_centered_dialog_scan_at = 0.0
         self._last_summary_probe_at = 0.0
+        self._last_summary_probe_hwnd = None
+        self._last_summary_probe_button_bounds = None
         self._last_detection_diagnostic_at = 0.0
         self._debug_export_capture_enabled = bool(
             self._config.get("debug_export_capture", False)
@@ -1725,8 +1875,12 @@ class ProcessMonitor(QThread):
         self._export_page_context_active = False
         self._export_page_context_checked_at = 0.0
         self._export_page_context_hwnd = None
+        self._creative_transfer_context_active = False
+        self._creative_transfer_ignore_worker_until = 0.0
         self._last_centered_dialog_scan_at = 0.0
         self._last_summary_probe_at = 0.0
+        self._last_summary_probe_hwnd = None
+        self._last_summary_probe_button_bounds = None
 
     def _log_detection_diagnostic(
         self,
@@ -1743,6 +1897,7 @@ class ProcessMonitor(QThread):
         startup_guard_active: bool,
         should_skip_visual_probe: bool,
         dialog_mode: bool,
+        creative_transfer_context: bool,
         trigger_reason: str,
     ):
         if (
@@ -1759,7 +1914,7 @@ class ProcessMonitor(QThread):
             "capture_class=%s, export_hwnd=%s, export_worker_pid=%s, image_ok=%s, "
             "visual_candidate=%s, button_clicked=%s, summary_probe=%s, cached_count=%s, "
             "has_evidence=%s, startup_guard=%s, visual_warmup_skip=%s, dialog_mode=%s, "
-            "centered_scan=%s, trigger_reason=%s",
+            "creative_transfer=%s, centered_scan=%s, trigger_reason=%s",
             self._current_pid,
             self._main_hwnd,
             capture_hwnd,
@@ -1776,6 +1931,7 @@ class ProcessMonitor(QThread):
             startup_guard_active,
             should_skip_visual_probe,
             dialog_mode,
+            creative_transfer_context,
             self._centered_dialog_scan_enabled,
             trigger_reason,
         )
@@ -1998,27 +2154,42 @@ class ProcessMonitor(QThread):
         self,
         now: float,
         main_image: Image.Image | None,
+        capture_hwnd: int | None = None,
         dialog_mode: bool = False,
         button_bounds: tuple[int, int, int, int] | None = None,
     ) -> int | None:
         """直接用摘要区做一次导出页预判，命中后立刻可用于触发收费。"""
         if main_image is None or button_bounds is None:
             return None
+        same_probe_target = (
+            self._last_summary_probe_hwnd == capture_hwnd
+            and self._last_summary_probe_button_bounds == button_bounds
+        )
         if (
             self._last_summary_probe_at
+            and same_probe_target
             and (now - self._last_summary_probe_at)
             < EXPORT_SUMMARY_PROBE_INTERVAL_SECONDS
         ):
             return None
 
         self._last_summary_probe_at = now
+        self._last_summary_probe_hwnd = capture_hwnd
+        self._last_summary_probe_button_bounds = button_bounds
         export_count = detect_export_summary_count_from_image(
             main_image,
             dialog_mode=dialog_mode,
             button_bounds=button_bounds,
             fast_mode=True,
+            return_creative_sentinel=True,
         )
+        if export_count == CREATIVE_TRANSFER_SUMMARY_SENTINEL:
+            self._creative_transfer_context_active = True
+            self._creative_transfer_ignore_worker_until = now + 8.0
+            logger.info("导出摘要预判识别为导出至创意中转页，本轮不触发收费")
+            return export_count
         if export_count is not None:
+            self._creative_transfer_context_active = False
             logger.info("导出摘要预判命中: count=%s", export_count)
             self._remember_export_count(export_count, now)
         return export_count
@@ -2265,6 +2436,8 @@ class ProcessMonitor(QThread):
             "cached_export_count": self._cached_export_count,
             "cached_export_count_at": self._cached_export_count_at,
             "export_page_context_active": self._export_page_context_active,
+            "creative_transfer_context_active": self._creative_transfer_context_active,
+            "creative_transfer_ignore_worker_until": self._creative_transfer_ignore_worker_until,
             "last_export_capture_hwnd": self._last_export_capture_hwnd,
             "last_export_capture_dialog_mode": self._last_export_capture_dialog_mode,
             "last_centered_dialog_scan_at": self._last_centered_dialog_scan_at,
@@ -2406,9 +2579,55 @@ class ProcessMonitor(QThread):
                     summary_probe_count = self._probe_export_summary_count(
                         now,
                         main_image,
+                        capture_hwnd=capture_hwnd,
                         dialog_mode=dialog_mode,
                         button_bounds=export_button_bounds,
                     )
+                creative_transfer_layout = (
+                    looks_like_creative_transfer_layout(main_image, export_button_bounds)
+                    if export_visual_candidate and main_image is not None
+                    else False
+                )
+                if creative_transfer_layout:
+                    self._creative_transfer_context_active = True
+                    self._creative_transfer_ignore_worker_until = now + 8.0
+                creative_transfer_worker_tail = (
+                    export_pid is not None
+                    and self._creative_transfer_ignore_worker_until > now
+                    and summary_probe_count is None
+                )
+                creative_transfer_context = (
+                    summary_probe_count == CREATIVE_TRANSFER_SUMMARY_SENTINEL
+                    or creative_transfer_layout
+                    or creative_transfer_worker_tail
+                    or (
+                        self._creative_transfer_context_active
+                        and export_visual_candidate
+                    )
+                )
+                if creative_transfer_context:
+                    if (
+                        export_visual_candidate
+                        or summary_probe_count is not None
+                        or export_pid is not None
+                    ):
+                        logger.info(
+                            "当前为导出至创意中转页，跳过收费触发: capture_hwnd=%s, export_pid=%s, summary_probe=%s, button_bounds=%s",
+                            capture_hwnd,
+                            export_pid,
+                            summary_probe_count,
+                            export_button_bounds,
+                        )
+                    export_hwnd = None
+                    export_pid = None
+                    summary_probe_count = None
+                    export_button_bounds = None
+                    export_visual_candidate = False
+                    self._last_left_button_down = False
+                elif not export_visual_candidate:
+                    self._creative_transfer_context_active = False
+                    if self._creative_transfer_ignore_worker_until <= now:
+                        self._creative_transfer_ignore_worker_until = 0.0
                 self._export_page_context_active = False
                 self._export_page_context_hwnd = capture_hwnd
                 self._export_page_context_checked_at = now
@@ -2514,6 +2733,7 @@ class ProcessMonitor(QThread):
                 centered_dialog_count = None
                 if (
                     not has_export_evidence
+                    and not creative_transfer_context
                     and self._centered_dialog_scan_enabled
                     and not self._was_exporting
                     and not self._hold_export_state
@@ -2557,6 +2777,7 @@ class ProcessMonitor(QThread):
                     startup_guard_active,
                     should_skip_visual_probe,
                     dialog_mode,
+                    creative_transfer_context,
                     trigger_reason,
                 )
 

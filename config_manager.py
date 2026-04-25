@@ -7,6 +7,7 @@ import json
 import hashlib
 import os
 import sys
+import unicodedata
 
 
 def get_app_dir():
@@ -21,9 +22,25 @@ def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def normalize_password_input(password: str) -> str:
+    """规范化管理员输入，兼容中文输入法全角字符和误输入首尾空格。"""
+    return unicodedata.normalize("NFKC", password or "").strip()
+
+
 def verify_password(password: str, hashed: str) -> bool:
     """验证密码是否匹配"""
-    return hash_password(password) == hashed
+    if not hashed:
+        return False
+
+    candidates = [
+        password or "",
+        (password or "").strip(),
+        normalize_password_input(password or ""),
+    ]
+    for candidate in dict.fromkeys(candidates):
+        if hash_password(candidate) == hashed:
+            return True
+    return False
 
 
 DEFAULT_CONFIG = {
@@ -63,6 +80,11 @@ class ConfigManager:
         else:
             self._config = DEFAULT_CONFIG.copy()
 
+    def reload(self):
+        """重新从磁盘加载配置，返回自身便于链式调用。"""
+        self.load()
+        return self
+
     def save(self):
         """保存配置到文件"""
         with open(self._config_path, "w", encoding="utf-8") as f:
@@ -81,6 +103,10 @@ class ConfigManager:
         """批量更新配置并保存"""
         self._config.update(data)
         self.save()
+
+    @property
+    def config_path(self) -> str:
+        return self._config_path
 
     @property
     def rate(self) -> float:
