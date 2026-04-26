@@ -1179,25 +1179,33 @@ class Application:
         if not self._is_exporting or self._payment_confirmed:
             return
 
+        # 先尝试快速获取导出张数
+        detected_export_count, export_count_source = (
+            self._resolve_export_count_for_overlay()
+        )
+        self._monitor.suspend_target_processes()
         self._overlay.show_payment(
             minutes,
             rate,
             hwnd=self._monitor.main_hwnd,
             lock_targets=self._monitor.lock_target_hwnds,
-            export_count=0,
+            export_count=detected_export_count,
             export_rate=self._config.export_rate,
         )
-        self._overlay.set_counting_status(True)
+        self._apply_export_count_to_overlay(
+            detected_export_count, export_count_source, minutes, rate
+        )
         logger.info(
-            "等待遮罩结束，收费弹窗已显示（统计中）: minutes=%s, overlay_visible=%s",
-            minutes,
-            self._overlay.isVisible(),
+            "等待遮罩结束，收费弹窗已显示: minutes=%s, export_count=%s, source=%s",
+            minutes, detected_export_count, export_count_source
         )
 
-        QTimer.singleShot(
-            120,
-            lambda m=minutes, r=rate: self._refine_export_count_after_overlay(m, r),
-        )
+        # 如果首屏是默认值或0，启动后台OCR线程精修
+        if export_count_source == "default" or detected_export_count <= 0:
+            QTimer.singleShot(
+                120,
+                lambda m=minutes, r=rate: self._refine_export_count_after_overlay(m, r),
+            )
 
     def _on_export_wait_finished(self, _result=None):
         """等待遮罩结束：有待显示的收费框就继续显示，否则只关闭遮罩。"""

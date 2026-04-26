@@ -1,4 +1,4 @@
-# SoftwareUsageMeter
+﻿# SoftwareUsageMeter
 
 ## 2026-04-26 导出守卫与张数识别补充
 
