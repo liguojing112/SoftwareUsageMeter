@@ -81,7 +81,7 @@ python main.py
 ### 打包
 
 ```powershell
-build.bat
+.\build.bat
 ```
 
 或：
