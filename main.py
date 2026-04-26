@@ -239,13 +239,19 @@ class StartupHintDialog(QDialog):
         card_layout.addWidget(title)
 
         body = QLabel(
-            "点击导出按钮后，系统将自动弹出收费框。"
-            "客户完成付款，输入管理员密码解锁即可导出照片。"
+            "1. 顾客点击像素蛋糕导出按钮\n"
+            "2. 像素蛋糕弹出导出框\n"
+            "3. 本程序弹出收费框\n"
+            "4. 引导顾客扫码付款\n"
+            "5. 管理员输入密码确认收款\n"
+            "6. 解锁后再让顾客继续导出照片\n"
+            "7. 导出照片后，请关闭像素蛋糕APP\n"
+            "8. 10秒钟后程序自动进入下一轮监控计时"
         )
-        body.setFont(QFont("Microsoft YaHei", 30, QFont.Bold))
+        body.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
         body.setWordWrap(True)
         body.setAlignment(Qt.AlignCenter)
-        body.setContentsMargins(20, 10, 20, 10)
+        body.setContentsMargins(30, 20, 30, 20)
         body.setStyleSheet(
             """
             color: rgba(17, 34, 53, 0.86);
@@ -546,6 +552,7 @@ class Application:
         self._export_wait_overlay = None
         self._pending_wait_payment_args = None
         self._refine_worker = None
+        self._manual_export_count_fallback_allowed = False
         self._original_excepthook = sys.excepthook
         self._original_sigint_handler = signal.getsignal(signal.SIGINT)
         self._signal_pump_timer = QTimer(self._app)
@@ -620,6 +627,7 @@ class Application:
             # 设置导出状态，防止监控线程重复触发
             self._is_exporting = True
             self._payment_confirmed = False
+            self._prepare_export_count_fallback_policy()
             self._monitor.set_export_state_hold(True)
             # 获取计时时长和费率
             minutes = self._timer.get_elapsed_minutes()
@@ -697,14 +705,16 @@ class Application:
         if width < 300 or height < 160:
             return None
 
-        # 放宽热区范围，覆盖更广的右上角区域
-        hot_width = min(max(int(width * 0.35), 420), 800)
-        hot_height = min(max(int(height * 0.18), 100), 200)
+        # 热区范围：右上角区域，但要排除标题栏（关闭按钮区域）
+        # 标题栏通常高度约30-40像素，我们向下偏移一段距离
+        title_bar_height = 40  # 假设标题栏高度
+        hot_width = min(max(int(width * 0.30), 350), 600)
+        hot_height = min(max(int(height * 0.15), 80), 150)
         return (
             max(left, right - hot_width),
-            top,
-            right,
-            min(bottom, top + hot_height),
+            top + title_bar_height,  # 向下偏移，跳过标题栏
+            right - 50,  # 右边留出50像素，避免覆盖关闭按钮
+            min(bottom, top + title_bar_height + hot_height),
         )
 
     def _get_fast_export_target_hwnd(self, cursor_x: int, cursor_y: int):
@@ -1088,6 +1098,28 @@ class Application:
             return self._config.default_export_count, "default"
         return detected_export_count, export_count_source
 
+    def _is_creative_manual_fallback_context(self) -> bool:
+        """只有创意链路允许 OCR 失败后进入手动填写张数兜底。"""
+        try:
+            snapshot = self._monitor.get_runtime_snapshot()
+        except Exception:
+            return False
+
+        if not snapshot.get("creative_transfer_context_active"):
+            return False
+
+        ignore_until = snapshot.get("creative_transfer_ignore_worker_until") or 0.0
+        return ignore_until <= 0 or ignore_until > time.monotonic()
+
+    def _prepare_export_count_fallback_policy(self):
+        self._manual_export_count_fallback_allowed = (
+            self._is_creative_manual_fallback_context()
+        )
+        logger.info(
+            "导出张数手动兜底策略: manual_allowed=%s",
+            self._manual_export_count_fallback_allowed,
+        )
+
     def _apply_export_count_to_overlay(
         self, export_count: int, export_count_source: str, minutes: int, rate: float
     ):
@@ -1142,14 +1174,22 @@ class Application:
             self._overlay.set_counting_status(False)
             return
 
-        # 识别失败或识别到0张时，启用手动输入模式
+        # 识别失败或识别到0张时，只有创意本地导出链路启用手动输入兜底。
         if count is None or count <= 0:
-            logger.warning(
-                "收费框已显示，但识别失败或张数为0，启用手动输入模式: count=%s, source=%s",
-                count, source
-            )
             self._overlay.set_counting_status(False)
-            self._overlay.set_manual_export_count_required(True)
+            if getattr(self, "_manual_export_count_fallback_allowed", False):
+                logger.warning(
+                    "创意本地导出张数识别失败或为0，启用手动输入兜底: count=%s, source=%s",
+                    count,
+                    source,
+                )
+                self._overlay.set_manual_export_count_required(True)
+            else:
+                logger.warning(
+                    "普通导出张数暂未识别到，不启用手动输入模式: count=%s, source=%s",
+                    count,
+                    source,
+                )
             return
 
         if (
@@ -1178,11 +1218,23 @@ class Application:
         """5 秒等待结束后继续原来的收费弹窗流程。"""
         if not self._is_exporting or self._payment_confirmed:
             return
+        # 防止收费框已经显示时重复显示
+        if self._overlay.isVisible():
+            logger.warning("收费框已显示，跳过重复显示")
+            return
 
         # 先尝试快速获取导出张数
         detected_export_count, export_count_source = (
             self._resolve_export_count_for_overlay()
         )
+
+        # 如果首屏无法获取有效张数（非默认值且<=0），才考虑手动输入
+        if export_count_source != "default" and detected_export_count <= 0:
+            logger.warning(
+                "首屏获取到无效张数: count=%s, source=%s，将启动后台OCR精修",
+                detected_export_count, export_count_source
+            )
+
         self._monitor.suspend_target_processes()
         self._overlay.show_payment(
             minutes,
@@ -1200,8 +1252,8 @@ class Application:
             minutes, detected_export_count, export_count_source
         )
 
-        # 如果首屏是默认值或0，启动后台OCR线程精修
-        if export_count_source == "default" or detected_export_count <= 0:
+        # 只有在首屏是默认值时才启动后台OCR线程精修
+        if export_count_source == "default":
             QTimer.singleShot(
                 120,
                 lambda m=minutes, r=rate: self._refine_export_count_after_overlay(m, r),
@@ -1253,11 +1305,22 @@ class Application:
     def _on_export_detected(self):
         """检测到导出行为"""
         if self._is_exporting:
+            if not self._payment_confirmed:
+                self._monitor.set_export_state_hold(True)
             return  # 防止重复触发
+        wait_overlay_visible = (
+            self._export_wait_overlay is not None
+            and self._export_wait_overlay.isVisible()
+        )
+        # 如果收费框已经显示，说明本次导出已经进入收费流程。
+        if self._overlay.isVisible():
+            self._monitor.set_export_state_hold(True)
+            return
 
         try:
             self._is_exporting = True
             self._payment_confirmed = False
+            self._prepare_export_count_fallback_policy()
             self._monitor.set_post_payment_pending(False)
             logger.info("检测到导出行为，停止计时并准备立即显示收费弹窗")
             self._log_runtime_snapshot("导出触发前")
@@ -1272,6 +1335,11 @@ class Application:
 
             minutes = self._timer.get_elapsed_minutes()
             rate = self._config.rate
+
+            if wait_overlay_visible:
+                self._pending_wait_payment_args = (minutes, rate)
+                logger.info("检测到导出行为时等待遮罩已显示，已合并到当前导出流程")
+                return
 
             # 先用全屏等待遮罩吃掉鼠标点击，5 秒后再继续原来的收费弹窗流程。
             self._show_export_wait_overlay(minutes, rate)
@@ -1308,6 +1376,20 @@ class Application:
             self._finish_export_cycle()
             return
 
+        wait_overlay_visible = (
+            self._export_wait_overlay is not None
+            and self._export_wait_overlay.isVisible()
+        )
+        payment_overlay_visible = self._overlay.isVisible()
+        if wait_overlay_visible or payment_overlay_visible:
+            logger.info(
+                "忽略付款前的导出关闭信号，当前导出仍在等待/收费接管中: wait_overlay=%s, payment_overlay=%s",
+                wait_overlay_visible,
+                payment_overlay_visible,
+            )
+            self._monitor.set_export_state_hold(True)
+            return
+
         logger.info("导出在付款前被取消，关闭收费弹窗并恢复计时")
         self._monitor.set_export_state_hold(False)
         self._monitor.set_post_payment_pending(False)
@@ -1323,6 +1405,7 @@ class Application:
             self._overlay.close_payment()
         self._is_exporting = False
         self._payment_confirmed = False
+        self._manual_export_count_fallback_allowed = False
         self._current_export_count = 0
         if self._monitor.is_process_running:
             self._timer.start()
@@ -1447,6 +1530,7 @@ class Application:
         rate = self._config.rate
         self._is_exporting = True
         self._payment_confirmed = False
+        self._manual_export_count_fallback_allowed = True
         self._monitor.set_export_state_hold(True)
         self._monitor.set_post_payment_pending(False)
         detected_export_count, export_count_source = (
@@ -1475,6 +1559,7 @@ class Application:
         """当前收费流程结束，准备进入下一轮计时。"""
         self._is_exporting = False
         self._payment_confirmed = False
+        self._manual_export_count_fallback_allowed = False
         self._current_export_count = 0
         self._monitor.set_post_payment_pending(False)
         if self._monitor.is_process_running:

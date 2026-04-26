@@ -1139,6 +1139,11 @@ def extract_export_summary_count_from_text(text: str) -> int | None:
         logger.info("忽略导出至创意摘要张数: text=%s", compact[:120])
         return None
 
+    # 排除"导入"相关文本，避免创意编辑页的"成功导入X张图片"被误识别
+    if "导入" in compact:
+        logger.info("忽略导入相关文本，不识别为导出张数: text=%s", compact[:120])
+        return None
+
     patterns = [
         r"导出(\d+)张图片",
         r"导出(\d+)张图",
@@ -2185,7 +2190,7 @@ class ProcessMonitor(QThread):
         )
         if export_count == CREATIVE_TRANSFER_SUMMARY_SENTINEL:
             self._creative_transfer_context_active = True
-            self._creative_transfer_ignore_worker_until = now + 8.0
+            self._creative_transfer_ignore_worker_until = now + 60.0  # 延长到60秒
             logger.info("导出摘要预判识别为导出至创意中转页，本轮不触发收费")
             return export_count
         if export_count is not None:
@@ -2590,19 +2595,20 @@ class ProcessMonitor(QThread):
                 )
                 if creative_transfer_layout:
                     self._creative_transfer_context_active = True
-                    self._creative_transfer_ignore_worker_until = now + 8.0
+                    self._creative_transfer_ignore_worker_until = now + 60.0  # 延长到60秒
                 creative_transfer_worker_tail = (
                     export_pid is not None
                     and self._creative_transfer_ignore_worker_until > now
                     and summary_probe_count is None
                 )
+                # 创意上下文保护：只要在保护时间内，就应该跳过收费
                 creative_transfer_context = (
                     summary_probe_count == CREATIVE_TRANSFER_SUMMARY_SENTINEL
                     or creative_transfer_layout
                     or creative_transfer_worker_tail
                     or (
                         self._creative_transfer_context_active
-                        and export_visual_candidate
+                        and self._creative_transfer_ignore_worker_until > now
                     )
                 )
                 if creative_transfer_context:
@@ -2612,7 +2618,7 @@ class ProcessMonitor(QThread):
                         or export_pid is not None
                     ):
                         logger.info(
-                            "当前为导出至创意中转页，跳过收费触发: capture_hwnd=%s, export_pid=%s, summary_probe=%s, button_bounds=%s",
+                            "当前为创意上下文保护中，跳过收费触发: capture_hwnd=%s, export_pid=%s, summary_probe=%s, button_bounds=%s",
                             capture_hwnd,
                             export_pid,
                             summary_probe_count,
@@ -2624,9 +2630,10 @@ class ProcessMonitor(QThread):
                     export_button_bounds = None
                     export_visual_candidate = False
                     self._last_left_button_down = False
-                elif not export_visual_candidate:
-                    self._creative_transfer_context_active = False
+                else:
+                    # 只有在保护超时后才清除保护状态
                     if self._creative_transfer_ignore_worker_until <= now:
+                        self._creative_transfer_context_active = False
                         self._creative_transfer_ignore_worker_until = 0.0
                 self._export_page_context_active = False
                 self._export_page_context_hwnd = capture_hwnd
@@ -2923,6 +2930,10 @@ class ProcessMonitor(QThread):
     def set_export_state_hold(self, hold: bool):
         """收费弹窗显示期间暂时保持导出状态，避免被遮罩误判为取消。"""
         self._hold_export_state = hold
+        # 当开始真正的导出流程时，清除创意上下文保护状态
+        if hold:
+            self._creative_transfer_context_active = False
+            self._creative_transfer_ignore_worker_until = 0.0
 
     def set_post_payment_pending(self, active: bool):
         """标记当前是否仍在等待同一次已付款导出完全结束。"""
