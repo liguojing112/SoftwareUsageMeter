@@ -46,7 +46,7 @@ def verify_password(password: str, hashed: str) -> bool:
 DEFAULT_CONFIG = {
     "rate": 1.0,  # 计时单价（元/分钟）
     "export_rate": 0.0,  # 单张导出单价（元/张）
-    "default_export_count": 1,  # 默认导出张数（OCR失败时使用）
+    "default_export_count": 1,  # 历史兼容字段；OCR失败时现在要求管理员手动填写
     "admin_password": hash_password("admin"),  # 默认密码: admin
     "qr_code_path": "",  # 收款码图片路径
     "wechat_qr_code_path": "",  # 微信收款码图片路径

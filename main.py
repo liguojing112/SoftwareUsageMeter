@@ -617,7 +617,14 @@ class Application:
                 cursor_y,
                 pending_click["hotzone"],
             )
-            self._show_export_wait_overlay()
+            # 设置导出状态，防止监控线程重复触发
+            self._is_exporting = True
+            self._payment_confirmed = False
+            self._monitor.set_export_state_hold(True)
+            # 获取计时时长和费率
+            minutes = self._timer.get_elapsed_minutes()
+            rate = self._config.rate
+            self._show_export_wait_overlay(minutes, rate)
             return
 
         is_new_press = left_down and not was_left_down
@@ -690,8 +697,9 @@ class Application:
         if width < 300 or height < 160:
             return None
 
-        hot_width = min(max(int(width * 0.24), 320), 620)
-        hot_height = min(max(int(height * 0.10), 74), 130)
+        # 放宽热区范围，覆盖更广的右上角区域
+        hot_width = min(max(int(width * 0.35), 420), 800)
+        hot_height = min(max(int(height * 0.18), 100), 200)
         return (
             max(left, right - hot_width),
             top,
@@ -780,7 +788,8 @@ class Application:
         red = color & 0xFF
         green = (color >> 8) & 0xFF
         blue = (color >> 16) & 0xFF
-        return red >= 150 and green >= 110 and blue <= 110 and red >= green >= blue
+        # 放宽颜色范围：黄橙色系（红高绿中蓝低）
+        return red >= 140 and green >= 100 and blue <= 120 and red >= green - 30
 
     def _start_monitor_if_needed(self):
         """稍微延后启动监控线程，减少应用首屏卡顿。"""
@@ -1133,16 +1142,14 @@ class Application:
             self._overlay.set_counting_status(False)
             return
 
-        if count is None:
+        # 识别失败或识别到0张时，启用手动输入模式
+        if count is None or count <= 0:
             logger.warning(
-                "收费框已显示，但延后识别仍未拿到导出张数，继续保留当前金额显示"
+                "收费框已显示，但识别失败或张数为0，启用手动输入模式: count=%s, source=%s",
+                count, source
             )
             self._overlay.set_counting_status(False)
-            self._overlay.update_display(
-                minutes, rate,
-                export_count=self._current_export_count,
-                export_rate=self._config.export_rate,
-            )
+            self._overlay.set_manual_export_count_required(True)
             return
 
         if (

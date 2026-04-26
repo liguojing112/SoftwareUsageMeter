@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QApplication,
     QGraphicsDropShadowEffect,
+    QSpinBox,
 )
 
 try:
@@ -109,6 +110,13 @@ class PaymentOverlay(QWidget):
         self._config = config or _InlineConfig(qr_code_path=qr_code_path)
         self._locked_hwnds = []
         self._payment_completion_emitted = False
+        self._duration_minutes = 0
+        self._rate = float(getattr(self._config, "rate", 1.0))
+        self._export_rate = float(getattr(self._config, "export_rate", 0.0))
+        self._current_export_count = 0
+        self._manual_export_count_required = False
+        self._counting_export_count = False
+        self._syncing_export_count_input = False
         self._keep_top_timer = QTimer(self)
         self._keep_top_timer.setInterval(500)
         self._keep_top_timer.timeout.connect(self._keep_on_top)
@@ -229,6 +237,55 @@ class PaymentOverlay(QWidget):
         self._export_count_label.setFont(QFont("Microsoft YaHei", 36, QFont.Bold))
         self._export_count_label.setStyleSheet("color: #18263a;")
         info_panel_layout.addWidget(self._export_count_label)
+
+        self._manual_count_frame = QFrame()
+        self._manual_count_frame.setObjectName("manualExportCountFrame")
+        self._manual_count_frame.setStyleSheet(
+            """
+            QFrame#manualExportCountFrame {
+                background-color: rgba(255, 176, 61, 0.22);
+                border: 2px solid rgba(246, 176, 61, 0.78);
+                border-radius: 18px;
+            }
+            """
+        )
+        manual_count_layout = QHBoxLayout(self._manual_count_frame)
+        manual_count_layout.setContentsMargins(18, 14, 18, 14)
+        manual_count_layout.setSpacing(18)
+
+        manual_count_label = QLabel("识别失败，请手动输入导出张数")
+        manual_count_label.setFont(QFont("Microsoft YaHei", 22, QFont.Bold))
+        manual_count_label.setStyleSheet("color: #18263a;")
+        manual_count_label.setWordWrap(True)
+        manual_count_layout.addWidget(manual_count_label, stretch=1)
+
+        self._manual_count_input = QSpinBox()
+        self._manual_count_input.setRange(0, 999)
+        self._manual_count_input.setSingleStep(1)
+        self._manual_count_input.setSpecialValueText("请填写")
+        self._manual_count_input.setFont(QFont("Microsoft YaHei", 28, QFont.Bold))
+        self._manual_count_input.setFixedSize(210, 74)
+        self._manual_count_input.setAlignment(Qt.AlignCenter)
+        self._manual_count_input.setStyleSheet(
+            """
+            QSpinBox {
+                background-color: rgba(255, 255, 255, 0.94);
+                color: #18263a;
+                border: 2px solid rgba(24, 38, 58, 0.24);
+                border-radius: 14px;
+                padding: 4px 14px;
+            }
+            QSpinBox:focus {
+                border: 2px solid #f6b03d;
+            }
+            """
+        )
+        self._manual_count_input.valueChanged.connect(
+            self._on_manual_export_count_changed
+        )
+        self._manual_count_frame.hide()
+        manual_count_layout.addWidget(self._manual_count_input)
+        info_panel_layout.addWidget(self._manual_count_frame)
 
         self._export_rate_label = QLabel("单张导出单价：¥ 0.00 元/张")
         self._export_rate_label.setFont(QFont("Microsoft YaHei", 26))
@@ -385,6 +442,7 @@ class PaymentOverlay(QWidget):
         lock_targets=None,
         export_count: int = 0,
         export_rate: float = 0.0,
+        manual_count_required: bool = False,
     ):
         """
         显示收费弹窗
@@ -393,11 +451,13 @@ class PaymentOverlay(QWidget):
         :param hwnd: 要锁定的窗口句柄
         :param lock_targets: 需要统一锁定的窗口句柄列表
         """
+        self._payment_completion_emitted = False
+
         # 更新显示
         self.update_display(
             minutes, rate, export_count=export_count, export_rate=export_rate
         )
-        self._payment_completion_emitted = False
+        self.set_manual_export_count_required(manual_count_required)
 
         # 通过全屏置顶遮罩层阻断操作，避免直接禁用外部窗口导致异常退出后残留不可点击状态
         self._locked_hwnds = []
@@ -425,35 +485,109 @@ class PaymentOverlay(QWidget):
         export_rate: float = 0.0,
     ):
         """单独更新弹窗金额信息，便于调试和测试。"""
+        self._duration_minutes = max(int(duration_minutes), 0)
+        self._rate = max(float(rate), 0.0)
+        self._export_rate = max(float(export_rate), 0.0)
+        self._current_export_count = max(int(export_count), 0)
+
+        if hasattr(self, "_manual_count_input") and not self._manual_export_count_required:
+            self._syncing_export_count_input = True
+            self._manual_count_input.setValue(self._current_export_count)
+            self._syncing_export_count_input = False
+
+        self._render_payment_details()
+        self._refresh_confirm_button_state()
+
+    def _render_payment_details(self):
+        """根据当前张数状态刷新金额显示。"""
         details = calculate_payment_details(
-            duration_minutes=duration_minutes,
-            rate=rate,
-            export_count=export_count,
-            export_rate=export_rate,
+            duration_minutes=self._duration_minutes,
+            rate=self._rate,
+            export_count=self._current_export_count,
+            export_rate=self._export_rate,
         )
         self._time_label.setText(f"使用时长：{details['duration_minutes']} 分钟")
         self._rate_label.setText(f"计时单价：¥ {details['rate']:.2f} 元/分钟")
-        self._export_count_label.setText(f"导出张数：{details['export_count']} 张")
         self._export_rate_label.setText(
             f"单张导出单价：¥ {details['export_rate']:.2f} 元/张"
         )
         self._time_amount_label.setText(f"计时费用：¥ {details['time_total']:.2f}")
-        self._export_amount_label.setText(f"导出费用：¥ {details['export_total']:.2f}")
-        self._amount_label.setText(f"合计金额：¥ {details['total']:.2f}")
 
-    def set_counting_status(self, counting: bool):
-        """切换导出张数标签为'正在统计张数...'或恢复正常显示。"""
-        if counting:
+        if self._counting_export_count:
             self._export_count_label.setText("导出张数：正在统计...")
             self._export_count_label.setStyleSheet("color: #888;")
             self._export_amount_label.setText("导出费用：计算中...")
             self._amount_label.setText("合计金额：计算中...")
+            return
+
+        self._export_count_label.setStyleSheet("color: #18263a;")
+        if self._manual_export_count_required and self._current_export_count <= 0:
+            self._export_count_label.setText("导出张数：请手动填写")
+            self._export_amount_label.setText("导出费用：待填写")
+            self._amount_label.setText("合计金额：待填写")
+            return
+
+        self._export_count_label.setText(f"导出张数：{details['export_count']} 张")
+        self._export_amount_label.setText(f"导出费用：¥ {details['export_total']:.2f}")
+        self._amount_label.setText(f"合计金额：¥ {details['total']:.2f}")
+
+    def _refresh_confirm_button_state(self):
+        """识别失败手填前禁止确认，避免少收或漏收。"""
+        if self._counting_export_count:
             self._confirm_btn.setEnabled(False)
             self._confirm_btn.setText("正在统计张数...")
+            return
+
+        if self._manual_export_count_required and self._current_export_count <= 0:
+            self._confirm_btn.setEnabled(False)
+            self._confirm_btn.setText("请先输入导出张数")
+            return
+
+        self._confirm_btn.setEnabled(True)
+        self._confirm_btn.setText("已付款 · 确认收款")
+
+    def _on_manual_export_count_changed(self, value: int):
+        """管理员手动填写导出张数后实时重算费用。"""
+        if self._syncing_export_count_input:
+            return
+
+        self._current_export_count = max(int(value), 0)
+        self._counting_export_count = False
+        logger.info("管理员手动填写导出张数: %s", self._current_export_count)
+        self._render_payment_details()
+        self._refresh_confirm_button_state()
+
+    def set_manual_export_count_required(self, required: bool):
+        """切换为识别失败后的手动填写模式。"""
+        self._manual_export_count_required = bool(required)
+        if hasattr(self, "_manual_count_frame"):
+            self._manual_count_frame.setVisible(self._manual_export_count_required)
+
+        if hasattr(self, "_manual_count_input"):
+            self._syncing_export_count_input = True
+            self._manual_count_input.setValue(self._current_export_count)
+            self._syncing_export_count_input = False
+            if self._manual_export_count_required:
+                self._counting_export_count = False
+                self._manual_count_input.setFocus()
+
+        self._render_payment_details()
+        self._refresh_confirm_button_state()
+
+    def is_manual_export_count_required(self) -> bool:
+        return self._manual_export_count_required
+
+    def current_export_count(self) -> int:
+        return self._current_export_count
+
+    def set_counting_status(self, counting: bool):
+        """切换导出张数标签为'正在统计张数...'或恢复正常显示。"""
+        self._counting_export_count = bool(counting)
+        if self._counting_export_count:
+            self.set_manual_export_count_required(False)
         else:
-            self._export_count_label.setStyleSheet("color: #18263a;")
-            self._confirm_btn.setEnabled(True)
-            self._confirm_btn.setText("已付款 · 确认收款")
+            self._render_payment_details()
+            self._refresh_confirm_button_state()
 
     def _lock_windows(self, handles: list[int]):
         """锁定像素蛋糕相关窗口，防止收费前继续操作。"""
@@ -592,6 +726,13 @@ class PaymentOverlay(QWidget):
         if self._payment_completion_emitted:
             return
 
+        if self._manual_export_count_required and self._current_export_count <= 0:
+            logger.warning("导出张数未填写，拒绝确认收款")
+            self._refresh_confirm_button_state()
+            if hasattr(self, "_manual_count_input"):
+                self._manual_count_input.setFocus()
+            return
+
         self._payment_completion_emitted = True
         logger.info("收费框确认按钮已触发")
         self.payment_completed.emit()
@@ -605,8 +746,23 @@ class PaymentOverlay(QWidget):
 
     def close_payment(self):
         """关闭收费弹窗并解锁目标窗口"""
+        logger.info(
+            "收费框关闭: visible_before=%s, export_count=%s, manual_required=%s, counting=%s",
+            self.isVisible(),
+            self._current_export_count,
+            self._manual_export_count_required,
+            self._counting_export_count,
+        )
         self._keep_top_timer.stop()
         self._payment_completion_emitted = False
+        self._manual_export_count_required = False
+        self._counting_export_count = False
+        if hasattr(self, "_manual_count_frame"):
+            self._manual_count_frame.hide()
+        if hasattr(self, "_manual_count_input"):
+            self._syncing_export_count_input = True
+            self._manual_count_input.setValue(0)
+            self._syncing_export_count_input = False
 
         # 解锁目标窗口
         self._unlock_windows(self._locked_hwnds)
@@ -617,6 +773,7 @@ class PaymentOverlay(QWidget):
     def reset_payment_confirmation(self):
         """管理员未确认时，允许再次点击确认收款按钮。"""
         self._payment_completion_emitted = False
+        self._refresh_confirm_button_state()
         if self.isVisible():
             self._confirm_btn.setFocus()
 
