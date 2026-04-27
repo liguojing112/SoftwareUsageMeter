@@ -255,13 +255,15 @@ def is_valid_target_main_window(hwnd: int | None) -> bool:
 
         title = get_window_title(hwnd).strip().lower()
         class_name = get_window_class(hwnd).strip().lower()
-        if not title:
-            return False
         if class_name in {"consolewindowclass"}:
             return False
         if any(
             keyword in class_name
             for keyword in ["toolsavebits", "tooltips_class32", "ime"]
+        ):
+            return False
+        if not title and not any(
+            keyword in class_name for keyword in ["qt", "qwindow"]
         ):
             return False
 
@@ -1818,9 +1820,11 @@ class ProcessMonitor(QThread):
         self._post_payment_pending_since = None
         self._cached_export_count = None
         self._cached_export_count_at = None
+        self._cached_export_count_pid = None
         self._last_export_count_refresh_at = 0.0
         self._last_export_capture_image = None
         self._last_export_capture_at = None
+        self._last_export_capture_pid = None
         self._last_export_capture_hwnd = None
         self._last_export_capture_dialog_mode = False
         self._last_left_button_down = False
@@ -1872,9 +1876,11 @@ class ProcessMonitor(QThread):
     def _reset_export_count_cache(self):
         self._cached_export_count = None
         self._cached_export_count_at = None
+        self._cached_export_count_pid = None
         self._last_export_count_refresh_at = 0.0
         self._last_export_capture_image = None
         self._last_export_capture_at = None
+        self._last_export_capture_pid = None
         self._last_export_capture_hwnd = None
         self._last_export_capture_dialog_mode = False
         self._export_page_context_active = False
@@ -1946,6 +1952,7 @@ class ProcessMonitor(QThread):
             return
         self._cached_export_count = export_count
         self._cached_export_count_at = observed_at
+        self._cached_export_count_pid = self._current_pid
 
     def _remember_export_capture(
         self,
@@ -1958,6 +1965,7 @@ class ProcessMonitor(QThread):
             return
         self._last_export_capture_image = image.copy()
         self._last_export_capture_at = observed_at
+        self._last_export_capture_pid = self._current_pid
         self._last_export_capture_hwnd = capture_hwnd
         self._last_export_capture_dialog_mode = dialog_mode
 
@@ -2440,10 +2448,12 @@ class ProcessMonitor(QThread):
             "post_payment_pending_since": self._post_payment_pending_since,
             "cached_export_count": self._cached_export_count,
             "cached_export_count_at": self._cached_export_count_at,
+            "cached_export_count_pid": self._cached_export_count_pid,
             "export_page_context_active": self._export_page_context_active,
             "creative_transfer_context_active": self._creative_transfer_context_active,
             "creative_transfer_ignore_worker_until": self._creative_transfer_ignore_worker_until,
             "last_export_capture_hwnd": self._last_export_capture_hwnd,
+            "last_export_capture_pid": self._last_export_capture_pid,
             "last_export_capture_dialog_mode": self._last_export_capture_dialog_mode,
             "last_centered_dialog_scan_at": self._last_centered_dialog_scan_at,
             "last_debug_export_bundle": self._last_debug_export_bundle,
@@ -2935,6 +2945,69 @@ class ProcessMonitor(QThread):
             self._creative_transfer_context_active = False
             self._creative_transfer_ignore_worker_until = 0.0
 
+    def assume_export_in_progress(
+        self, reason: str = "", main_hwnd: int | None = None
+    ):
+        """外部快速触发路径已接管导出时，预先进入导出状态。"""
+        if main_hwnd:
+            try:
+                pid = get_window_pid(main_hwnd)
+            except Exception:
+                pid = None
+            if pid and pid != self._current_pid:
+                self._current_pid = pid
+                self._known_export_worker_pids = find_export_worker_pids(pid)
+                self._reset_export_count_cache()
+                self._reset_export_candidates()
+            self._main_hwnd = main_hwnd
+        self._was_exporting = True
+        self._export_clear_candidate_since = None
+        logger.info(
+            "外部触发已标记导出进行中: reason=%s, main_hwnd=%s, pid=%s",
+            reason,
+            main_hwnd,
+            self._current_pid,
+        )
+
+    def clear_export_count_cache(self, reason: str = ""):
+        """清空导出张数和截图缓存，进入新的 PixCake 使用生命周期。"""
+        self._reset_export_count_cache()
+        logger.info("已清空导出张数缓存: reason=%s", reason)
+
+    def snapshot_current_export_capture(self, reason: str = "") -> bool:
+        """保存当前 PixCake 导出页截图，供挂起后后台 OCR 使用。"""
+        if self._suspended_pids:
+            logger.info("目标进程已挂起，跳过导出页截图快照: reason=%s", reason)
+            return False
+        capture_hwnd = get_preferred_capture_hwnd(
+            self._current_pid, self._main_hwnd, self._export_hwnd
+        )
+        if not capture_hwnd:
+            logger.info("无可截图窗口，跳过导出页截图快照: reason=%s", reason)
+            return False
+        image = capture_window_image(capture_hwnd)
+        if image is None:
+            logger.info(
+                "导出页截图快照失败: reason=%s, pid=%s, hwnd=%s",
+                reason,
+                self._current_pid,
+                capture_hwnd,
+            )
+            return False
+        self._remember_export_capture(
+            image,
+            time.monotonic(),
+            capture_hwnd,
+            dialog_mode=self._current_dialog_mode(),
+        )
+        logger.info(
+            "已保存当前生命周期导出页截图快照: reason=%s, pid=%s, hwnd=%s",
+            reason,
+            self._current_pid,
+            capture_hwnd,
+        )
+        return True
+
     def set_post_payment_pending(self, active: bool):
         """标记当前是否仍在等待同一次已付款导出完全结束。"""
         if self._post_payment_pending != active:
@@ -2947,6 +3020,14 @@ class ProcessMonitor(QThread):
     ) -> int | None:
         """获取最近一次在导出页识别到的导出张数。"""
         if self._cached_export_count is None or self._cached_export_count_at is None:
+            return None
+        if self._cached_export_count_pid != self._current_pid:
+            logger.info(
+                "忽略上一生命周期的导出张数缓存: cached_pid=%s, current_pid=%s, count=%s",
+                self._cached_export_count_pid,
+                self._current_pid,
+                self._cached_export_count,
+            )
             return None
         if (time.monotonic() - self._cached_export_count_at) > max(
             max_age_seconds, 0.0
@@ -2961,6 +3042,7 @@ class ProcessMonitor(QThread):
         if (
             self._last_export_capture_image is None
             or self._last_export_capture_at is None
+            or self._last_export_capture_pid != self._current_pid
             or (time.monotonic() - self._last_export_capture_at)
             > max(max_age_seconds, 0.0)
         ):
@@ -3059,6 +3141,8 @@ class ProcessMonitor(QThread):
             if selected_pid and selected_pid != self._current_pid:
                 self._current_pid = selected_pid
                 self._main_hwnd = find_main_window(selected_pid) or self._main_hwnd
+                self._reset_export_count_cache()
+                self._reset_export_candidates()
                 logger.info(
                     "恢复交互时重新选择主实例: process_name=%s, current_pid=%s, main_hwnd=%s",
                     self._config.process_name,

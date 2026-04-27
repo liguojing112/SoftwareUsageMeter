@@ -115,13 +115,14 @@ class _ExportCountWorker(QThread):
     """在后台线程跑 OCR，避免阻塞主线程导致 UI 卡死。"""
     result_ready = _Signal(object, str)  # (count: int|None, source: str)
 
-    def __init__(self, resolve_fn, parent=None):
+    def __init__(self, resolve_fn, resolve_kwargs=None, parent=None):
         super().__init__(parent)
         self._resolve_fn = resolve_fn
+        self._resolve_kwargs = resolve_kwargs or {}
 
     def run(self):
         try:
-            count, source = self._resolve_fn(allow_expensive=True)
+            count, source = self._resolve_fn(**self._resolve_kwargs)
             self.result_ready.emit(count, source)
         except Exception:
             logger.exception("导出张数后台识别失败")
@@ -552,6 +553,10 @@ class Application:
         self._export_wait_overlay = None
         self._pending_wait_payment_args = None
         self._refine_worker = None
+        self._refine_worker_session_id = None
+        self._stale_refine_workers = []
+        self._export_session_id = 0
+        self._active_export_session_id = 0
         self._manual_export_count_fallback_allowed = False
         self._original_excepthook = sys.excepthook
         self._original_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -565,6 +570,7 @@ class Application:
         )
         self._fast_export_left_down = False
         self._fast_export_pending_click = None
+        self._fast_export_target_hwnd = None
         self._last_fast_export_wait_at = 0.0
 
         # 连接信号
@@ -627,12 +633,18 @@ class Application:
             # 设置导出状态，防止监控线程重复触发
             self._is_exporting = True
             self._payment_confirmed = False
-            self._prepare_export_count_fallback_policy()
-            self._monitor.set_export_state_hold(True)
+            self._begin_export_session("fast_hotzone")
             # 获取计时时长和费率
             minutes = self._timer.get_elapsed_minutes()
             rate = self._config.rate
             self._show_export_wait_overlay(minutes, rate)
+            self._prepare_export_count_fallback_policy()
+            self._monitor.set_export_state_hold(True)
+            if hasattr(self._monitor, "assume_export_in_progress"):
+                self._monitor.assume_export_in_progress(
+                    "fast_hotzone",
+                    main_hwnd=pending_click.get("target_hwnd"),
+                )
             return
 
         is_new_press = left_down and not was_left_down
@@ -675,6 +687,7 @@ class Application:
             "at": now,
             "cursor": (cursor_x, cursor_y),
             "hotzone": hotzone,
+            "target_hwnd": getattr(self, "_fast_export_target_hwnd", None),
         }
         logger.info(
             "快速导出热区按下命中，等待鼠标松开后显示遮罩: cursor=(%s,%s), hotzone=%s",
@@ -690,31 +703,34 @@ class Application:
 
         hwnd = self._get_fast_export_target_hwnd(cursor_x, cursor_y)
         if not hwnd:
+            self._fast_export_target_hwnd = None
             return None
 
         try:
             if not win32gui.IsWindow(hwnd) or not win32gui.IsWindowVisible(hwnd):
+                self._fast_export_target_hwnd = None
                 return None
             left, top, right, bottom = win32gui.GetWindowRect(hwnd)
         except Exception:
             logger.debug("快速导出热区获取目标窗口失败: hwnd=%s", hwnd, exc_info=True)
+            self._fast_export_target_hwnd = None
             return None
 
         width = right - left
         height = bottom - top
         if width < 300 or height < 160:
+            self._fast_export_target_hwnd = None
             return None
 
-        # 热区范围：右上角区域，但要排除标题栏（关闭按钮区域）
-        # 标题栏通常高度约30-40像素，我们向下偏移一段距离
-        title_bar_height = 40  # 假设标题栏高度
-        hot_width = min(max(int(width * 0.30), 350), 600)
-        hot_height = min(max(int(height * 0.15), 80), 150)
+        self._fast_export_target_hwnd = hwnd
+        # 覆盖窗口真实右上角黄色导出按钮；误点关闭按钮由黄色像素采样继续过滤。
+        hot_width = min(max(int(width * 0.35), 420), 800)
+        hot_height = min(max(int(height * 0.18), 100), 220)
         return (
             max(left, right - hot_width),
-            top + title_bar_height,  # 向下偏移，跳过标题栏
-            right - 50,  # 右边留出50像素，避免覆盖关闭按钮
-            min(bottom, top + title_bar_height + hot_height),
+            top,
+            right,
+            min(bottom, top + hot_height),
         )
 
     def _get_fast_export_target_hwnd(self, cursor_x: int, cursor_y: int):
@@ -973,6 +989,7 @@ class Application:
     def _on_process_started(self):
         """目标程序启动"""
         self._monitor.set_post_payment_pending(False)
+        self._clear_export_count_cache("process_started")
         if self._is_exporting:
             logger.info("目标程序已启动，但当前仍处于导出结算流程，暂不开始新计时")
             self._tray.set_running_state(False)
@@ -1003,6 +1020,7 @@ class Application:
             self._trigger_retroactive_payment(elapsed_minutes)
             return
 
+        self._clear_export_count_cache("process_stopped")
         self._timer.reset()
         self._tray.reset()
         self._is_exporting = False
@@ -1011,6 +1029,22 @@ class Application:
         self._tray.show_notification(
             "本轮已结束", f"{self._config.process_name} 已退出，计时已清零"
         )
+
+    def _clear_export_count_cache(self, reason: str):
+        self._current_export_count = 0
+        if hasattr(self._monitor, "clear_export_count_cache"):
+            self._monitor.clear_export_count_cache(reason)
+
+    def _begin_export_session(self, reason: str) -> int:
+        self._export_session_id = getattr(self, "_export_session_id", 0) + 1
+        self._active_export_session_id = self._export_session_id
+        self._current_export_count = 0
+        logger.info(
+            "开始新的导出计数会话: session_id=%s, reason=%s",
+            self._active_export_session_id,
+            reason,
+        )
+        return self._active_export_session_id
 
     def _trigger_retroactive_payment(self, minutes: int):
         """程序退出后的保底收费，防止漏单。"""
@@ -1032,19 +1066,50 @@ class Application:
         )
 
     def _resolve_export_count_for_payment(
-        self, allow_expensive: bool = False
+        self, allow_expensive: bool = False, allow_cached: bool = True
     ) -> tuple[int | None, str]:
         """尽量用最近缓存的导出信息，避免为了显示收费框再次做重截图。"""
-        cached_export_count = self._monitor.get_recent_export_count()
-        if cached_export_count is not None:
-            logger.info("本次收费优先使用预缓存导出张数: %s", cached_export_count)
-            return cached_export_count, "cache"
-
-        last_export_image = self._monitor.get_last_export_capture_image()
-        last_export_dialog_mode = self._monitor.get_last_export_capture_dialog_mode()
         current_dialog_mode = self._monitor.export_hwnd is not None
 
         detected_export_count = None
+
+        if allow_expensive:
+            pre_suspend_image = self._monitor.capture_main_window_image()
+            if pre_suspend_image is not None:
+                detected_export_count = (
+                    self._monitor.detect_export_summary_count_from_image(
+                        pre_suspend_image, dialog_mode=current_dialog_mode
+                    )
+                )
+                if detected_export_count is None:
+                    detected_export_count = (
+                        self._monitor.detect_export_image_count_from_image(
+                            pre_suspend_image, dialog_mode=current_dialog_mode
+                        )
+                    )
+                if detected_export_count is not None:
+                    logger.info(
+                        "本次收费使用等待后实时截图导出张数: %s",
+                        detected_export_count,
+                    )
+                    return detected_export_count, "live_capture"
+
+            detected_export_count = self._monitor.detect_export_summary_count()
+            if detected_export_count is not None:
+                return detected_export_count, "summary_scan"
+
+            detected_export_count = self._monitor.detect_export_image_count()
+            if detected_export_count is not None:
+                return detected_export_count, "image_scan"
+
+        if allow_cached:
+            cached_export_count = self._monitor.get_recent_export_count()
+            if cached_export_count is not None:
+                logger.info("本次收费使用预缓存导出张数: %s", cached_export_count)
+                return cached_export_count, "cache"
+
+        last_export_image = self._monitor.get_last_export_capture_image()
+        last_export_dialog_mode = self._monitor.get_last_export_capture_dialog_mode()
         if last_export_image is not None:
             detected_export_count = (
                 self._monitor.detect_export_summary_count_from_image(
@@ -1063,36 +1128,14 @@ class Application:
         if not allow_expensive:
             return None, "deferred"
 
-        pre_suspend_image = self._monitor.capture_main_window_image()
-        if pre_suspend_image is not None:
-            detected_export_count = (
-                self._monitor.detect_export_summary_count_from_image(
-                    pre_suspend_image, dialog_mode=current_dialog_mode
-                )
-            )
-            if detected_export_count is None:
-                detected_export_count = (
-                    self._monitor.detect_export_image_count_from_image(
-                        pre_suspend_image, dialog_mode=current_dialog_mode
-                    )
-                )
-            if detected_export_count is not None:
-                return detected_export_count, "live_capture"
-
-        detected_export_count = self._monitor.detect_export_summary_count()
-        if detected_export_count is not None:
-            return detected_export_count, "summary_scan"
-
-        detected_export_count = self._monitor.detect_export_image_count()
-        if detected_export_count is not None:
-            return detected_export_count, "image_scan"
-
         return None, "default"
 
-    def _resolve_export_count_for_overlay(self) -> tuple[int, str]:
+    def _resolve_export_count_for_overlay(
+        self, allow_expensive: bool = False
+    ) -> tuple[int, str]:
         """收费框首屏使用的快速导出张数来源，优先保证弹窗能立即出现。"""
         detected_export_count, export_count_source = (
-            self._resolve_export_count_for_payment(allow_expensive=False)
+            self._resolve_export_count_for_payment(allow_expensive=allow_expensive)
         )
         if detected_export_count is None:
             return self._config.default_export_count, "default"
@@ -1150,6 +1193,7 @@ class Application:
 
     def _refine_export_count_after_overlay(self, minutes: int, rate: float):
         """收费框显示后启动后台 OCR 线程，避免阻塞主线程。"""
+        session_id = getattr(self, "_active_export_session_id", 0)
         if (
             not self._is_exporting
             or self._payment_confirmed
@@ -1158,38 +1202,68 @@ class Application:
             self._overlay.set_counting_status(False)
             return
 
-        if self._refine_worker is not None and self._refine_worker.isRunning():
-            return
+        if not hasattr(self, "_stale_refine_workers"):
+            self._stale_refine_workers = []
 
-        worker = _ExportCountWorker(self._resolve_export_count_for_payment)
+        if self._refine_worker is not None and self._refine_worker.isRunning():
+            if getattr(self, "_refine_worker_session_id", None) == session_id:
+                return
+            self._stale_refine_workers.append(self._refine_worker)
+
+        worker = _ExportCountWorker(
+            self._resolve_export_count_for_payment,
+            resolve_kwargs={"allow_expensive": True, "allow_cached": False},
+        )
         worker.result_ready.connect(
-            lambda count, source: self._on_refine_result(count, source, minutes, rate)
+            lambda count, source, sid=session_id: self._on_refine_result(
+                count, source, minutes, rate, sid
+            )
+        )
+        worker.finished.connect(
+            lambda w=worker, sid=session_id: self._on_refine_worker_finished(w, sid)
         )
         self._refine_worker = worker
+        self._refine_worker_session_id = session_id
         worker.start()
 
-    def _on_refine_result(self, count, source: str, minutes: int, rate: float):
+    def _on_refine_worker_finished(self, worker, session_id: int):
+        if self._refine_worker is worker:
+            self._refine_worker = None
+            self._refine_worker_session_id = None
+        if worker in getattr(self, "_stale_refine_workers", []):
+            self._stale_refine_workers.remove(worker)
+        worker.deleteLater()
+
+    def _on_refine_result(
+        self, count, source: str, minutes: int, rate: float, session_id: int | None = None
+    ):
         """OCR 线程完成后在主线程更新收费框。"""
+        if (
+            session_id is not None
+            and session_id != getattr(self, "_active_export_session_id", 0)
+        ):
+            logger.info(
+                "忽略过期导出计数结果: result_session=%s, active_session=%s, count=%s, source=%s",
+                session_id,
+                getattr(self, "_active_export_session_id", 0),
+                count,
+                source,
+            )
+            return
+
         if not self._is_exporting or self._payment_confirmed or not self._overlay.isVisible():
             self._overlay.set_counting_status(False)
             return
 
-        # 识别失败或识别到0张时，只有创意本地导出链路启用手动输入兜底。
-        if count is None or count <= 0:
+        # 最终收费张数只能来自当前会话截图识别或人工输入；缓存/默认值不能入账。
+        if count is None or count <= 0 or source in {"cache", "default", "deferred"}:
             self._overlay.set_counting_status(False)
-            if getattr(self, "_manual_export_count_fallback_allowed", False):
-                logger.warning(
-                    "创意本地导出张数识别失败或为0，启用手动输入兜底: count=%s, source=%s",
-                    count,
-                    source,
-                )
-                self._overlay.set_manual_export_count_required(True)
-            else:
-                logger.warning(
-                    "普通导出张数暂未识别到，不启用手动输入模式: count=%s, source=%s",
-                    count,
-                    source,
-                )
+            logger.warning(
+                "本次导出张数未获得可靠识别结果，启用手动输入: count=%s, source=%s",
+                count,
+                source,
+            )
+            self._overlay.set_manual_export_count_required(True)
             return
 
         if (
@@ -1223,19 +1297,15 @@ class Application:
             logger.warning("收费框已显示，跳过重复显示")
             return
 
-        # 先尝试快速获取导出张数
-        detected_export_count, export_count_source = (
-            self._resolve_export_count_for_overlay()
-        )
-
-        # 如果首屏无法获取有效张数（非默认值且<=0），才考虑手动输入
-        if export_count_source != "default" and detected_export_count <= 0:
-            logger.warning(
-                "首屏获取到无效张数: count=%s, source=%s，将启动后台OCR精修",
-                detected_export_count, export_count_source
+        # 收费首屏不读取默认值/缓存值，避免把上一单或占位 1 张入账。
+        detected_export_count = 0
+        self._current_export_count = 0
+        snapshot_saved = False
+        if hasattr(self._monitor, "snapshot_current_export_capture"):
+            snapshot_saved = self._monitor.snapshot_current_export_capture(
+                "before_payment_overlay"
             )
 
-        self._monitor.suspend_target_processes()
         self._overlay.show_payment(
             minutes,
             rate,
@@ -1244,20 +1314,19 @@ class Application:
             export_count=detected_export_count,
             export_rate=self._config.export_rate,
         )
-        self._apply_export_count_to_overlay(
-            detected_export_count, export_count_source, minutes, rate
-        )
+        self._overlay.set_counting_status(True)
+        self._flush_ui_events_once()
+        self._monitor.suspend_target_processes()
         logger.info(
-            "等待遮罩结束，收费弹窗已显示: minutes=%s, export_count=%s, source=%s",
-            minutes, detected_export_count, export_count_source
+            "等待遮罩结束，收费弹窗已显示并开始后台统计张数: minutes=%s, snapshot_saved=%s",
+            minutes,
+            snapshot_saved,
         )
 
-        # 只有在首屏是默认值时才启动后台OCR线程精修
-        if export_count_source == "default":
-            QTimer.singleShot(
-                120,
-                lambda m=minutes, r=rate: self._refine_export_count_after_overlay(m, r),
-            )
+        QTimer.singleShot(
+            80,
+            lambda m=minutes, r=rate: self._refine_export_count_after_overlay(m, r),
+        )
 
     def _on_export_wait_finished(self, _result=None):
         """等待遮罩结束：有待显示的收费框就继续显示，否则只关闭遮罩。"""
@@ -1292,7 +1361,15 @@ class Application:
         wait_overlay.finished.connect(self._on_export_wait_finished)
         self._export_wait_overlay = wait_overlay
         wait_overlay.show_wait()
+        self._flush_ui_events_once()
         logger.info("导出触发后已显示 5 秒等待遮罩")
+
+    def _flush_ui_events_once(self):
+        """让刚显示的全屏窗口立即完成一帧绘制，避免后续同步工作造成观感延迟。"""
+        try:
+            QApplication.processEvents()
+        except Exception:
+            logger.debug("刷新 Qt 事件失败", exc_info=True)
 
     def _on_export_button_pre_clicked(self):
         """用户点击导出按钮的瞬间先弹等待遮罩，给后续检测争取时间。"""
@@ -1320,6 +1397,7 @@ class Application:
         try:
             self._is_exporting = True
             self._payment_confirmed = False
+            self._begin_export_session("monitor_export_detected")
             self._prepare_export_count_fallback_policy()
             self._monitor.set_post_payment_pending(False)
             logger.info("检测到导出行为，停止计时并准备立即显示收费弹窗")
@@ -1330,19 +1408,20 @@ class Application:
             self._tray.set_running_state(False)
             self._monitor.set_export_state_hold(True)
 
-            # 目标进程此时已在监控线程里预挂起；这里再补一次幂等调用，兼容旧状态。
-            self._monitor.suspend_target_processes()
-
             minutes = self._timer.get_elapsed_minutes()
             rate = self._config.rate
 
             if wait_overlay_visible:
                 self._pending_wait_payment_args = (minutes, rate)
                 logger.info("检测到导出行为时等待遮罩已显示，已合并到当前导出流程")
+                # 等待遮罩已经可见后，再补一次幂等挂起。
+                self._monitor.suspend_target_processes()
                 return
 
             # 先用全屏等待遮罩吃掉鼠标点击，5 秒后再继续原来的收费弹窗流程。
             self._show_export_wait_overlay(minutes, rate)
+            # 目标进程此时已在监控线程里预挂起；这里再补一次幂等调用，兼容旧状态。
+            self._monitor.suspend_target_processes()
         except Exception:
             logger.exception("处理导出触发失败，正在恢复现场")
             self._monitor.set_export_state_hold(False)
@@ -1560,7 +1639,7 @@ class Application:
         self._is_exporting = False
         self._payment_confirmed = False
         self._manual_export_count_fallback_allowed = False
-        self._current_export_count = 0
+        self._clear_export_count_cache("finish_export_cycle")
         self._monitor.set_post_payment_pending(False)
         if self._monitor.is_process_running:
             self._timer.start()
