@@ -239,6 +239,8 @@ class StartupHintDialog(QDialog):
         title.setStyleSheet("color: #112235;")
         card_layout.addWidget(title)
 
+        from PyQt5.QtWidgets import QScrollArea
+
         body = QLabel(
             "1. 顾客点击像素蛋糕导出按钮\n"
             "2. 像素蛋糕弹出导出框\n"
@@ -247,7 +249,7 @@ class StartupHintDialog(QDialog):
             "5. 管理员输入密码确认收款\n"
             "6. 解锁后再让顾客继续导出照片\n"
             "7. 导出照片后，请关闭像素蛋糕APP\n"
-            "8. 10秒钟后程序自动进入下一轮监控计时"
+            "8. 程序会自动进入下一轮监控计时"
         )
         body.setFont(QFont("Microsoft YaHei", 24, QFont.Bold))
         body.setWordWrap(True)
@@ -263,7 +265,41 @@ class StartupHintDialog(QDialog):
             padding: 34px 42px;
             """
         )
-        card_layout.addWidget(body, 1)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(body)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet(
+            """
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollBar:vertical {
+                background: rgba(0, 0, 0, 0.08);
+                width: 12px;
+                border-radius: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(0, 0, 0, 0.25);
+                border-radius: 6px;
+                min-height: 40px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(0, 0, 0, 0.40);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+            """
+        )
+        card_layout.addWidget(scroll_area, 1)
 
         button = QPushButton("知道了")
         button.setCursor(Qt.PointingHandCursor)
@@ -558,6 +594,7 @@ class Application:
         self._export_session_id = 0
         self._active_export_session_id = 0
         self._manual_export_count_fallback_allowed = False
+        self._awaiting_process_close_after_paid_export = False
         self._original_excepthook = sys.excepthook
         self._original_sigint_handler = signal.getsignal(signal.SIGINT)
         self._signal_pump_timer = QTimer(self._app)
@@ -620,7 +657,11 @@ class Application:
                 return
             if now - self._last_fast_export_wait_at < 6.0:
                 return
-            if self._payment_confirmed or self._overlay.isVisible():
+            if (
+                self._payment_confirmed
+                or self._awaiting_process_close_after_paid_export
+                or self._overlay.isVisible()
+            ):
                 return
             self._last_fast_export_wait_at = now
             logger.info(
@@ -654,6 +695,7 @@ class Application:
         if (
             self._is_exporting
             or self._payment_confirmed
+            or self._awaiting_process_close_after_paid_export
             or self._overlay.isVisible()
             or (
                 self._export_wait_overlay is not None
@@ -921,6 +963,7 @@ class Application:
         return {
             "is_exporting": self._is_exporting,
             "payment_confirmed": self._payment_confirmed,
+            "awaiting_process_close_after_paid_export": self._awaiting_process_close_after_paid_export,
             "current_export_count": self._current_export_count,
             "overlay_visible": self._overlay.isVisible(),
             "timer_running": self._timer.is_running,
@@ -990,6 +1033,7 @@ class Application:
         """目标程序启动"""
         self._monitor.set_post_payment_pending(False)
         self._clear_export_count_cache("process_started")
+        self._awaiting_process_close_after_paid_export = False
         if self._is_exporting:
             logger.info("目标程序已启动，但当前仍处于导出结算流程，暂不开始新计时")
             self._tray.set_running_state(False)
@@ -1025,6 +1069,7 @@ class Application:
         self._tray.reset()
         self._is_exporting = False
         self._payment_confirmed = False
+        self._awaiting_process_close_after_paid_export = False
         self._current_export_count = 0
         self._tray.show_notification(
             "本轮已结束", f"{self._config.process_name} 已退出，计时已清零"
@@ -1373,7 +1418,11 @@ class Application:
 
     def _on_export_button_pre_clicked(self):
         """用户点击导出按钮的瞬间先弹等待遮罩，给后续检测争取时间。"""
-        if self._quit_requested or self._payment_confirmed:
+        if (
+            self._quit_requested
+            or self._payment_confirmed
+            or self._awaiting_process_close_after_paid_export
+        ):
             return
         if self._overlay.isVisible():
             return
@@ -1381,6 +1430,10 @@ class Application:
 
     def _on_export_detected(self):
         """检测到导出行为"""
+        if self._awaiting_process_close_after_paid_export:
+            logger.info("已付款导出完成后等待关闭 PixCake，忽略新的导出检测")
+            self._monitor.set_export_state_hold(True)
+            return
         if self._is_exporting:
             if not self._payment_confirmed:
                 self._monitor.set_export_state_hold(True)
@@ -1448,6 +1501,10 @@ class Application:
         """导出窗口关闭（取消导出或导出完成）"""
         if not self._is_exporting:
             return
+        if self._awaiting_process_close_after_paid_export:
+            logger.info("已付款导出完成后仍在等待 PixCake 退出，忽略重复导出关闭信号")
+            self._monitor.set_export_state_hold(True)
+            return
 
         if self._payment_confirmed:
             logger.info("导出已结束，进入下一次计时周期")
@@ -1506,6 +1563,12 @@ class Application:
     def _on_payment_confirmed(self):
         """管理员确认收款"""
         admin_confirmed = False
+        manual_count_required = False
+        overlay_export_count = self._current_export_count
+        if hasattr(self._overlay, "is_manual_export_count_required"):
+            manual_count_required = self._overlay.is_manual_export_count_required()
+        if hasattr(self._overlay, "current_export_count"):
+            overlay_export_count = self._overlay.current_export_count()
         pwd_dialog = PasswordDialog(self._config, self._overlay)
         self._overlay.pause_keep_on_top()
         try:
@@ -1521,28 +1584,47 @@ class Application:
             if self._overlay.isVisible() and not admin_confirmed:
                 self._overlay.resume_keep_on_top()
 
-        logger.info("确认收款，关闭弹窗并等待本次导出结束")
+        self._current_export_count = max(int(overlay_export_count or 0), 0)
+        logger.info(
+            "确认收款，关闭弹窗并等待用户完成本次导出: manual_count_required=%s, export_count=%s",
+            manual_count_required,
+            self._current_export_count,
+        )
         self._log_runtime_snapshot("确认收款前")
         self._overlay.close_payment()
-        self._monitor.set_post_payment_pending(True)
-        self._monitor.set_export_state_hold(False)
-        try:
-            restore_result = self._monitor.restore_target_interaction()
-        except Exception:
-            logger.exception("确认收款后执行交互恢复失败")
-            restore_result = {"error": True}
+        if manual_count_required and hasattr(self._monitor, "prepare_paid_export_retry"):
+            try:
+                restore_result = self._monitor.prepare_paid_export_retry()
+            except Exception:
+                logger.exception("确认收款后进入已付款待导出状态失败")
+                restore_result = {"error": True}
+        else:
+            self._monitor.set_post_payment_pending(True)
+            self._monitor.set_export_state_hold(False)
+            try:
+                restore_result = self._monitor.restore_target_interaction()
+            except Exception:
+                logger.exception("确认收款后执行交互恢复失败")
+                restore_result = {"error": True}
+            QTimer.singleShot(
+                180,
+                lambda: logger.info(
+                    "确认收款后延迟恢复结果: %s",
+                    self._monitor.restore_target_interaction(),
+                ),
+            )
         logger.info("确认收款后已执行交互恢复: %s", restore_result)
-        QTimer.singleShot(
-            180,
-            lambda: logger.info(
-                "确认收款后延迟恢复结果: %s",
-                self._monitor.restore_target_interaction(),
-            ),
-        )
         self._timer.reset()
         self._tray.reset()
         self._is_exporting = True
         self._payment_confirmed = True
+
+        if manual_count_required:
+            self._tray.show_notification(
+                "已确认收款",
+                "请回到像素蛋糕导出窗口点击“导出”，导出完成后将开始下一轮计时",
+            )
+            return
 
         # 手动触发收费等场景下可能没有导出窗口，直接进入下一轮
         if not self._monitor.is_export_dialog_visible:
@@ -1636,8 +1718,26 @@ class Application:
 
     def _finish_export_cycle(self):
         """当前收费流程结束，准备进入下一轮计时。"""
+        paid_export_completed = self._payment_confirmed
+        if paid_export_completed and self._monitor.is_process_running:
+            self._is_exporting = True
+            self._payment_confirmed = True
+            self._awaiting_process_close_after_paid_export = True
+            self._manual_export_count_fallback_allowed = False
+            self._clear_export_count_cache("finish_export_cycle_wait_process_close")
+            self._monitor.set_post_payment_pending(False)
+            self._monitor.set_export_state_hold(True)
+            self._tray.set_running_state(False)
+            self._tray.show_notification(
+                "本次导出已完成",
+                "请关闭像素蛋糕APP，关闭后系统会进入下一位顾客的生命周期",
+            )
+            logger.info("已付款导出完成，等待目标程序退出后再进入下一生命周期")
+            return
+
         self._is_exporting = False
         self._payment_confirmed = False
+        self._awaiting_process_close_after_paid_export = False
         self._manual_export_count_fallback_allowed = False
         self._clear_export_count_cache("finish_export_cycle")
         self._monitor.set_post_payment_pending(False)

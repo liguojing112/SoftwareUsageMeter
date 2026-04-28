@@ -134,7 +134,7 @@ class PaymentOverlay(QWidget):
         )
         self._load_qr_code()
         self._load_wallpaper()
-        self._confirm_btn.pressed.connect(self._emit_payment_completed)
+        self._confirm_btn.clicked.connect(self._emit_payment_completed)
 
     def _init_ui(self):
         """初始化界面"""
@@ -299,18 +299,22 @@ class PaymentOverlay(QWidget):
 
         total_panel = QFrame()
         total_panel.setObjectName("paymentTotalPanel")
+        total_panel.setMinimumWidth(520)
         total_panel_layout = QVBoxLayout(total_panel)
-        total_panel_layout.setContentsMargins(20, 18, 20, 18)
-        total_panel_layout.setSpacing(8)
+        total_panel_layout.setContentsMargins(36, 28, 36, 28)
+        total_panel_layout.setSpacing(10)
 
         total_hint = QLabel("当前应付")
-        total_hint.setFont(QFont("Microsoft YaHei", 20))
+        total_hint.setFont(QFont("Microsoft YaHei", 24))
         total_hint.setStyleSheet("color: rgba(24, 38, 58, 0.56);")
         total_panel_layout.addWidget(total_hint)
 
         self._amount_label = QLabel("合计金额：¥ --")
         self._amount_label.setFont(QFont("Microsoft YaHei", 48, QFont.Bold))
-        self._amount_label.setStyleSheet("color: #f39b2f;")
+        self._amount_label.setStyleSheet(
+            "color: #f39b2f; padding: 6px 4px; line-height: 1.3;"
+        )
+        self._amount_label.setMinimumHeight(72)
         total_panel_layout.addWidget(self._amount_label)
         info_panel_layout.addWidget(total_panel)
 

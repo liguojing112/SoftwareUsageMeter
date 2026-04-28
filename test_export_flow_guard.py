@@ -14,6 +14,11 @@ class FakeOverlay:
         self.manual_required_values = []
         self.display_updates = []
         self.payment_shows = []
+        self.pause_keep_on_top_calls = 0
+        self.resume_keep_on_top_calls = 0
+        self.reset_confirmation_calls = 0
+        self.manual_required = False
+        self.current_count = 0
 
     def isVisible(self):
         return self._visible
@@ -27,13 +32,31 @@ class FakeOverlay:
 
     def set_manual_export_count_required(self, required):
         self.manual_required_values.append(bool(required))
+        self.manual_required = bool(required)
 
     def update_display(self, *args, **kwargs):
         self.display_updates.append((args, kwargs))
+        if "export_count" in kwargs:
+            self.current_count = kwargs["export_count"]
 
     def show_payment(self, *args, **kwargs):
         self.payment_shows.append((args, kwargs))
         self._visible = True
+
+    def pause_keep_on_top(self):
+        self.pause_keep_on_top_calls += 1
+
+    def resume_keep_on_top(self):
+        self.resume_keep_on_top_calls += 1
+
+    def reset_payment_confirmation(self):
+        self.reset_confirmation_calls += 1
+
+    def is_manual_export_count_required(self):
+        return self.manual_required
+
+    def current_export_count(self):
+        return self.current_count
 
 
 class FakeWaitOverlay:
@@ -60,6 +83,7 @@ class FakeMonitor:
         self.live_image_count = None
         self.clear_cache_reasons = []
         self.events = []
+        self.paid_retry_calls = 0
 
     def set_export_state_hold(self, hold):
         self.hold_values.append(hold)
@@ -79,6 +103,12 @@ class FakeMonitor:
     def restore_target_interaction(self):
         self.restore_calls += 1
         return {"restored": True}
+
+    def prepare_paid_export_retry(self):
+        self.paid_retry_calls += 1
+        self.post_payment_values.append(True)
+        self.hold_values.append(False)
+        return {"restored": True, "paid_retry": True}
 
     def suspend_target_processes(self):
         self.events.append("suspend")
@@ -135,6 +165,7 @@ class FakeTimer:
         self.minutes = minutes
         self.paused = False
         self.started = False
+        self.reset_called = False
 
     def pause(self):
         self.paused = True
@@ -145,11 +176,15 @@ class FakeTimer:
     def get_elapsed_minutes(self):
         return self.minutes
 
+    def reset(self):
+        self.reset_called = True
+
 
 class FakeTray:
     def __init__(self):
         self.running_states = []
         self.notifications = []
+        self.reset_called = False
 
     def set_running_state(self, state):
         self.running_states.append(state)
@@ -157,11 +192,15 @@ class FakeTray:
     def show_notification(self, title, message):
         self.notifications.append((title, message))
 
+    def reset(self):
+        self.reset_called = True
+
 
 def make_app():
     app = Application.__new__(Application)
     app._is_exporting = True
     app._payment_confirmed = False
+    app._awaiting_process_close_after_paid_export = False
     app._current_export_count = 3
     app._export_wait_overlay = None
     app._pending_wait_payment_args = None
@@ -471,3 +510,52 @@ def test_wait_finished_shows_payment_before_expensive_counting(monkeypatch):
     assert app._overlay.counting_statuses[-1] is True
     assert app._monitor.events[:2] == ["snapshot", "suspend"]
     assert scheduled
+
+
+def test_manual_count_payment_confirmation_arms_paid_retry(monkeypatch):
+    class AcceptedPasswordDialog:
+        Accepted = 1
+
+        def __init__(self, config, parent=None):
+            self.authenticated = True
+
+        def exec_(self):
+            return self.Accepted
+
+    app = make_app()
+    app._overlay = FakeOverlay(visible=True)
+    app._overlay.manual_required = True
+    app._overlay.current_count = 3
+    app._current_export_count = 0
+    app._monitor.export_dialog_visible = True
+    monkeypatch.setattr(main, "PasswordDialog", AcceptedPasswordDialog)
+
+    app._on_payment_confirmed()
+
+    assert app._current_export_count == 3
+    assert app._payment_confirmed is True
+    assert app._monitor.paid_retry_calls == 1
+    assert app._monitor.restore_calls == 0
+    assert app._monitor.post_payment_values[-1] is True
+    assert app._monitor.hold_values[-1] is False
+
+
+def test_paid_export_completion_waits_for_pixcake_exit_before_rearming():
+    app = make_app()
+    app._is_exporting = True
+    app._payment_confirmed = True
+    app._monitor.export_dialog_visible = True
+
+    app._on_export_cancelled()
+
+    assert app._awaiting_process_close_after_paid_export is True
+    assert app._is_exporting is True
+    assert app._payment_confirmed is True
+    assert app._timer.started is False
+    assert app._tray.running_states[-1] is False
+    assert app._monitor.hold_values[-1] is True
+
+    app._on_export_detected()
+
+    assert app._show_export_wait_overlay_called is False
+    assert app._overlay.payment_shows == []

@@ -3181,6 +3181,19 @@ class ProcessMonitor(QThread):
                 "error": True,
             }
 
+    def prepare_paid_export_retry(self) -> dict:
+        """付款已确认，但仍需要用户回到 PixCake 再次点击导出按钮。"""
+        self._export_hwnd = None
+        self._export_pid = None
+        self._was_exporting = False
+        self._export_candidate_since = None
+        self._export_clear_candidate_since = None
+        self._hold_export_state = False
+        self.set_post_payment_pending(True)
+        result = self.restore_target_interaction()
+        logger.info("已进入已付款待用户点击导出状态: %s", result)
+        return result
+
     @property
     def current_pid(self) -> int | None:
         return self._current_pid
