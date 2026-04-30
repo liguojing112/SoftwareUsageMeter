@@ -211,7 +211,7 @@ class PaymentOverlay(QWidget):
         info_panel.setObjectName("paymentMetricPanel")
         info_panel_layout = QVBoxLayout(info_panel)
         info_panel_layout.setSpacing(20)
-        info_panel_layout.setContentsMargins(30, 30, 30, 34)
+        info_panel_layout.setContentsMargins(50, 30, 110, 34)
 
         info_title = QLabel("本次费用明细")
         info_title.setFont(QFont("Microsoft YaHei", 26, QFont.Bold))
@@ -299,7 +299,7 @@ class PaymentOverlay(QWidget):
 
         total_panel = QFrame()
         total_panel.setObjectName("paymentTotalPanel")
-        total_panel.setMinimumWidth(520)
+        total_panel.setMinimumWidth(600)
         total_panel_layout = QVBoxLayout(total_panel)
         total_panel_layout.setContentsMargins(36, 28, 36, 28)
         total_panel_layout.setSpacing(10)
@@ -315,6 +315,7 @@ class PaymentOverlay(QWidget):
             "color: #f39b2f; padding: 6px 4px; line-height: 1.3;"
         )
         self._amount_label.setMinimumHeight(72)
+        self._amount_label.setMinimumWidth(680)
         total_panel_layout.addWidget(self._amount_label)
         info_panel_layout.addWidget(total_panel)
 
