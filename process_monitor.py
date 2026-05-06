@@ -220,6 +220,80 @@ $result = Await-AsyncOperation $resultOp ([Windows.Media.Ocr.OcrResult])
 $result.Text
 """
 
+_WINDOWS_OCR_LANG_CHECKED = False
+_WINDOWS_OCR_LANG_AVAILABLE = True
+
+
+def _check_windows_ocr_language_pack() -> bool:
+    """检查 Windows OCR 中文语言包是否已安装。"""
+    global _WINDOWS_OCR_LANG_CHECKED, _WINDOWS_OCR_LANG_AVAILABLE
+    if _WINDOWS_OCR_LANG_CHECKED:
+        return _WINDOWS_OCR_LANG_AVAILABLE
+
+    _WINDOWS_OCR_LANG_CHECKED = True
+    if os.name != "nt":
+        _WINDOWS_OCR_LANG_AVAILABLE = False
+        return False
+
+    script = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+try {
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType=WindowsRuntime]
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+    if ($null -ne $engine) {
+        $lang = $engine.RecognizerLanguage.LanguageTag
+        Write-Output "OK:$lang"
+    } else {
+        Write-Output "MISSING"
+    }
+} catch {
+    Write-Output "ERROR:$($_.Exception.Message)"
+}
+"""
+
+    startupinfo = None
+    if hasattr(subprocess, "STARTUPINFO"):
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=5.0,
+            startupinfo=startupinfo,
+        )
+        output = (completed.stdout or "").strip()
+        if output.startswith("OK:"):
+            logger.info("Windows OCR 语言包可用: %s", output[3:])
+            _WINDOWS_OCR_LANG_AVAILABLE = True
+            return True
+        elif output.startswith("ERROR:"):
+            logger.warning("Windows OCR 引擎初始化失败: %s", output[6:])
+            _WINDOWS_OCR_LANG_AVAILABLE = False
+            return False
+        else:
+            stderr_text = (completed.stderr or "").strip()
+            logger.warning(
+                "Windows OCR 中文语言包未安装（stdout=%r stderr=%r）。"
+                "请尝试以下任一方式安装：\n"
+                "方式一：设置 > 时间和语言 > 语言 > 中文(简体) > 选项 > 基本输入/OCR\n"
+                "方式二：设置 > 应用 > 可选功能 > 添加功能 > 搜索\"光学字符识别\" > 安装\n"
+                "方式三：管理员 PowerShell 执行 Add-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0",
+                output[:100], stderr_text[:100],
+            )
+            _WINDOWS_OCR_LANG_AVAILABLE = False
+            return False
+    except Exception as exc:
+        logger.warning("Windows OCR 语言包检查失败: %s", exc)
+        _WINDOWS_OCR_LANG_AVAILABLE = False
+        return False
+
 
 def find_pids_by_name(process_name: str) -> list[int]:
     """通过进程名查找全部匹配 PID。"""
@@ -658,23 +732,106 @@ def locate_export_button_bounds(
     return (min_x, min_y, max_x, max_y)
 
 
+def _get_dwm_window_bounds(hwnd: int) -> tuple[int, int, int, int] | None:
+    """通过 DwmGetWindowAttribute 获取窗口扩展帧边界（DWMWA_EXTENDED_FRAME_BOUNDS=9）。"""
+    if not HAS_WIN32 or not hwnd:
+        return None
+    try:
+        rect = ctypes.wintypes.RECT()
+        result = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)
+        )
+        if result == 0:
+            return (rect.left, rect.top, rect.right, rect.bottom)
+    except Exception:
+        logger.debug("DWM 边界查询失败: hwnd=%s", hwnd)
+    return None
+
+
+def _is_image_usable(image: Image.Image | None) -> bool:
+    """检查截图是否可用（非全黑/全白/过小）。"""
+    if image is None:
+        return False
+    w, h = image.size
+    if w < 500 or h < 350:
+        return False
+    try:
+        grayscale = ImageOps.grayscale(image)
+        pixels = list(grayscale.getdata())
+        if not pixels:
+            return False
+        avg = sum(pixels) / len(pixels)
+        if avg < 5:
+            return False  # 全黑
+        if avg > 250:
+            return False  # 全白
+        import statistics
+        if statistics.pstdev(pixels) < 2:
+            return False  # 像素几乎一致
+        return True
+    except Exception:
+        return True
+
+
 def capture_window_image(hwnd: int) -> Image.Image | None:
-    """截取指定窗口当前屏幕内容。"""
+    """截取窗口截图，支持多种回退方式。"""
     if not HAS_WIN32 or not hwnd:
         return None
     try:
         if not win32gui.IsWindow(hwnd):
+            logger.debug("窗口句柄无效: hwnd=%s", hwnd)
             return None
+        if win32gui.IsIconic(hwnd):
+            logger.debug("窗口已最小化，无法截图: hwnd=%s", hwnd)
+            return None
+
         left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-        if right - left < 500 or bottom - top < 350:
+        w, h = right - left, bottom - top
+        logger.debug(
+            "GetWindowRect: hwnd=%s, bounds=(%d,%d,%d,%d), size=%dx%d",
+            hwnd, left, top, right, bottom, w, h,
+        )
+
+        # 尺寸异常时尝试 DWM 边界
+        if w < 500 or h < 350:
+            dwm_bounds = _get_dwm_window_bounds(hwnd)
+            if dwm_bounds is not None:
+                dl, dt, dr, db = dwm_bounds
+                dw, dh = dr - dl, db - dt
+                logger.debug(
+                    "GetWindowRect 尺寸异常，尝试 DWM 边界: hwnd=%s, dwm_size=%dx%d",
+                    hwnd, dw, dh,
+                )
+                if dw > 0 and dh > 0:
+                    image = _capture_window_image_printwindow(hwnd, dl, dt, dr, db)
+                    if image is not None and _is_image_usable(image):
+                        logger.info("截图成功 (DWM): hwnd=%s, size=%dx%d", hwnd, image.size[0], image.size[1])
+                        return image
+
+        if w < 500 or h < 350:
+            logger.debug("窗口太小: hwnd=%s, size=%dx%d", hwnd, w, h)
             return None
+
+        # 优先 PrintWindow
         image = _capture_window_image_printwindow(hwnd, left, top, right, bottom)
-        if image is not None:
+        if image is not None and _is_image_usable(image):
+            logger.debug("截图成功 (PrintWindow): hwnd=%s, size=%dx%d", hwnd, image.size[0], image.size[1])
             return image
+        elif image is not None:
+            logger.warning("PrintWindow 返回不可用图像: hwnd=%s, size=%dx%d", hwnd, image.size[0], image.size[1])
+
+        # 回退 ImageGrab
         if not HAS_IMAGE_GRAB:
+            logger.debug("ImageGrab 不可用，截图失败: hwnd=%s", hwnd)
             return None
-        return ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
-    except Exception:
+
+        logger.debug("PrintWindow 失败，回退 ImageGrab: hwnd=%s", hwnd)
+        grabbed = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
+        if grabbed and grabbed.size[0] > 0 and grabbed.size[1] > 0:
+            logger.debug("截图成功 (ImageGrab): hwnd=%s, size=%dx%d", hwnd, grabbed.size[0], grabbed.size[1])
+        return grabbed
+    except Exception as exc:
+        logger.debug("截图异常: hwnd=%s, error=%s", hwnd, exc)
         return None
 
 
@@ -734,6 +891,18 @@ def _capture_window_image_printwindow(
                 0,
                 1,
             )
+            # 检测空白图像（Win10 硬件加速窗口常见症状）
+            try:
+                grayscale = ImageOps.grayscale(image)
+                avg = sum(grayscale.getdata()) / max(image.size[0] * image.size[1], 1)
+                if avg < 5:
+                    logger.warning(
+                        "PrintWindow 返回全黑图像: hwnd=%s, size=%dx%d, brightness=%.1f",
+                        hwnd, image.size[0], image.size[1], avg,
+                    )
+                    return None
+            except Exception:
+                pass
             return image.copy()
         finally:
             if bitmap is not None:
@@ -761,6 +930,17 @@ def run_windows_ocr(
     if os.name != "nt" or not image_path or not os.path.exists(image_path):
         return ""
 
+    if not _check_windows_ocr_language_pack():
+        if not getattr(run_windows_ocr, "_lang_warned", False):
+            run_windows_ocr._lang_warned = True
+            logger.error(
+                "Windows OCR 中文语言包未安装，自动识别已禁用。"
+                "请尝试：方式一) 设置>语言>中文(简体)>选项>基本输入/OCR  "
+                "方式二) 设置>应用>可选功能>添加功能>搜索\"光学字符识别\"  "
+                "方式三) 管理员PowerShell: Add-WindowsCapability -Online -Name Language.OCR~~~zh-CN~0.0.1.0"
+            )
+        return ""
+
     startupinfo = None
     if hasattr(subprocess, "STARTUPINFO"):
         startupinfo = subprocess.STARTUPINFO()
@@ -770,7 +950,10 @@ def run_windows_ocr(
     escaped_path = image_path.replace("'", "''")
     script = WINDOWS_OCR_SCRIPT_TEMPLATE.replace("__IMAGE_PATH__", escaped_path)
 
+    logger.debug("Windows OCR 开始, 超时=%.1fs, 图片=%s", timeout_seconds, image_path)
+
     try:
+        started = time.monotonic()
         completed = subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True,
@@ -780,15 +963,33 @@ def run_windows_ocr(
             timeout=timeout_seconds,
             startupinfo=startupinfo,
         )
+        elapsed = time.monotonic() - started
+    except subprocess.TimeoutExpired:
+        logger.warning("Windows OCR 超时(%.1fs), 图片=%s", timeout_seconds, image_path)
+        return ""
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("调用 Windows OCR 失败: %s", exc)
         return ""
 
+    stdout_text = (completed.stdout or "").strip()
+    stderr_text = (completed.stderr or "").strip()
+
     if completed.returncode != 0:
-        logger.warning("Windows OCR 返回异常: %s", completed.stderr.strip())
+        logger.warning(
+            "Windows OCR 返回异常, returncode=%d, elapsed=%.2fs, stdout=%r, stderr=%r",
+            completed.returncode, elapsed, stdout_text[:200], stderr_text[:200],
+        )
         return ""
 
-    return (completed.stdout or "").strip()
+    if not stdout_text:
+        logger.warning(
+            "Windows OCR 输出为空, returncode=%d, elapsed=%.2fs, stderr=%r",
+            completed.returncode, elapsed, stderr_text[:200],
+        )
+        return ""
+
+    logger.debug("Windows OCR 成功, 耗时=%.2fs, 文本长度=%d", elapsed, len(stdout_text))
+    return stdout_text
 
 
 def run_windows_ocr_on_image(
@@ -1234,6 +1435,9 @@ def detect_export_summary_count_from_image(
     """优先从导出页左上角摘要区识别张数。"""
     if image is None:
         return None
+    if not _is_image_usable(image):
+        logger.debug("摘要区识别：截图不可用，跳过 OCR")
+        return None
 
     variants = [
         item
@@ -1314,6 +1518,9 @@ def detect_export_image_count_from_image(
     """从导出页截图中自动识别导出张数。"""
     if image is None:
         logger.debug("检测导出张数：图像为None")
+        return None
+    if not _is_image_usable(image):
+        logger.warning("检测导出张数：截图不可用（全黑/全白/尺寸过小），跳过 OCR")
         return None
 
     width, height = image.size
@@ -2042,11 +2249,20 @@ class ProcessMonitor(QThread):
         bundle_dir = os.path.join(self._debug_export_dir, bundle_name)
         os.makedirs(bundle_dir, exist_ok=True)
 
+        import statistics as _stats
+
+        grayscale_img = ImageOps.grayscale(main_image)
+        _pixels = list(grayscale_img.getdata())
+        _avg_brightness = float(sum(_pixels) / len(_pixels)) if _pixels else 0.0
+        _std_dev = float(_stats.pstdev(_pixels)) if _pixels else 0.0
+
         meta = {
             "reason": reason,
             "capture_hwnd": capture_hwnd,
             "button_bounds": list(button_bounds) if button_bounds else None,
             "image_size": list(main_image.size),
+            "image_avg_brightness": round(_avg_brightness, 2),
+            "image_std_dev": round(_std_dev, 2),
             "cached_export_count": self._cached_export_count,
             "export_page_context_active": self._export_page_context_active,
             "process_pid": self._current_pid,

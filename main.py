@@ -19,6 +19,27 @@ os.environ.setdefault("QT_SCALE_FACTOR", "1")
 os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 os.environ.setdefault("QT_FONT_DPI", "96")
 
+# ====== 设置进程 DPI 感知，避免 Win10 缩放下的坐标虚拟化 ======
+# 必须在 GetWindowRect 等 Win32 API 调用之前设置
+def _set_process_dpi_awareness() -> None:
+    try:
+        import ctypes
+        shcore = ctypes.windll.shcore
+        result = shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        if result == 0:
+            _write_early_crash_log("DPI awareness: PER_MONITOR_DPI_AWARE")
+            return
+    except Exception:
+        pass
+    try:
+        import ctypes
+        ctypes.windll.user32.SetProcessDPIAware()
+        _write_early_crash_log("DPI awareness: SetProcessDPIAware (fallback)")
+    except Exception:
+        pass
+
+_set_process_dpi_awareness()
+
 import traceback
 import time
 from datetime import datetime
