@@ -672,7 +672,7 @@ def locate_export_button_bounds(
 
     image = image.convert("RGB")
     width, height = image.size
-    if width < 500 or height < 350:
+    if width < 400 or height < 300:
         return None
 
     start_x = int(width * 0.55)
@@ -753,7 +753,7 @@ def _is_image_usable(image: Image.Image | None) -> bool:
     if image is None:
         return False
     w, h = image.size
-    if w < 500 or h < 350:
+    if w < 400 or h < 300:
         return False
     try:
         grayscale = ImageOps.grayscale(image)
@@ -793,12 +793,12 @@ def capture_window_image(hwnd: int) -> Image.Image | None:
         )
 
         # 尺寸异常时尝试 DWM 边界
-        if w < 500 or h < 350:
+        if w < 400 or h < 300:
             dwm_bounds = _get_dwm_window_bounds(hwnd)
             if dwm_bounds is not None:
                 dl, dt, dr, db = dwm_bounds
                 dw, dh = dr - dl, db - dt
-                logger.debug(
+                logger.info(
                     "GetWindowRect 尺寸异常，尝试 DWM 边界: hwnd=%s, dwm_size=%dx%d",
                     hwnd, dw, dh,
                 )
@@ -808,7 +808,7 @@ def capture_window_image(hwnd: int) -> Image.Image | None:
                         logger.info("截图成功 (DWM): hwnd=%s, size=%dx%d", hwnd, image.size[0], image.size[1])
                         return image
 
-        if w < 500 or h < 350:
+        if w < 400 or h < 300:
             logger.info("窗口太小，无法截图: hwnd=%s, size=%dx%d", hwnd, w, h)
             return None
 
@@ -855,7 +855,7 @@ def _capture_window_image_printwindow(
             left, top, right, bottom = win32gui.GetWindowRect(hwnd)
         width = max(int(right - left), 0)
         height = max(int(bottom - top), 0)
-        if width < 500 or height < 350:
+        if width < 400 or height < 300:
             return None
 
         hwnd_dc = win32gui.GetWindowDC(hwnd)
