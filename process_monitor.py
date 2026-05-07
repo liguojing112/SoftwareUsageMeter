@@ -779,15 +779,15 @@ def capture_window_image(hwnd: int) -> Image.Image | None:
         return None
     try:
         if not win32gui.IsWindow(hwnd):
-            logger.debug("窗口句柄无效: hwnd=%s", hwnd)
+            logger.info("窗口句柄无效，无法截图: hwnd=%s", hwnd)
             return None
         if win32gui.IsIconic(hwnd):
-            logger.debug("窗口已最小化，无法截图: hwnd=%s", hwnd)
+            logger.info("窗口已最小化，无法截图: hwnd=%s", hwnd)
             return None
 
         left, top, right, bottom = win32gui.GetWindowRect(hwnd)
         w, h = right - left, bottom - top
-        logger.debug(
+        logger.info(
             "GetWindowRect: hwnd=%s, bounds=(%d,%d,%d,%d), size=%dx%d",
             hwnd, left, top, right, bottom, w, h,
         )
@@ -809,7 +809,7 @@ def capture_window_image(hwnd: int) -> Image.Image | None:
                         return image
 
         if w < 500 or h < 350:
-            logger.debug("窗口太小: hwnd=%s, size=%dx%d", hwnd, w, h)
+            logger.info("窗口太小，无法截图: hwnd=%s, size=%dx%d", hwnd, w, h)
             return None
 
         # 优先 PrintWindow
@@ -822,16 +822,18 @@ def capture_window_image(hwnd: int) -> Image.Image | None:
 
         # 回退 ImageGrab
         if not HAS_IMAGE_GRAB:
-            logger.debug("ImageGrab 不可用，截图失败: hwnd=%s", hwnd)
+            logger.info("ImageGrab 不可用，截图失败: hwnd=%s", hwnd)
             return None
 
         logger.debug("PrintWindow 失败，回退 ImageGrab: hwnd=%s", hwnd)
         grabbed = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True)
         if grabbed and grabbed.size[0] > 0 and grabbed.size[1] > 0:
             logger.debug("截图成功 (ImageGrab): hwnd=%s, size=%dx%d", hwnd, grabbed.size[0], grabbed.size[1])
+        else:
+            logger.info("ImageGrab 截图失败: hwnd=%s, grabbed=%s", hwnd, grabbed is not None)
         return grabbed
     except Exception as exc:
-        logger.debug("截图异常: hwnd=%s, error=%s", hwnd, exc)
+        logger.info("截图异常: hwnd=%s, error=%s", hwnd, exc)
         return None
 
 
@@ -982,7 +984,7 @@ def run_windows_ocr(
         return ""
 
     if not stdout_text:
-        logger.warning(
+        logger.debug(
             "Windows OCR 输出为空, returncode=%d, elapsed=%.2fs, stderr=%r",
             completed.returncode, elapsed, stderr_text[:200],
         )

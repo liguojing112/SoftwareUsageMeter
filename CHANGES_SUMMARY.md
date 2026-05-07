@@ -27,6 +27,13 @@
   - 方式二：设置 > 应用 > 可选功能 > 添加功能 > 搜索"光学字符识别"
   - 方式三：管理员 PowerShell 执行 `Add-WindowsCapability`
 
+### 4. 日志级别与截图诊断优化
+
+**改动：**
+- `run_windows_ocr()` 空输出日志从 warning 降为 debug（居中扫描在编辑时无对话框文本是正常行为）
+- `capture_window_image()` 所有失败路径从 debug 提升到 info（窗口无效、最小化、太小、ImageGrab 失败、异常），便于非调试模式定位截图失败原因
+- 新增 GetWindowRect info 日志，可看到截图时的窗口尺寸
+
 ## 2026-04-26 启动守卫与导出张数安全更新
 
 ### 1. 启动阶段轻量守卫
