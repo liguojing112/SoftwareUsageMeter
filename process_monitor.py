@@ -96,7 +96,7 @@ CENTERED_DIALOG_SCAN_INTERVAL_SECONDS = 4.0
 CENTERED_DIALOG_DEBUG_DUMP_INTERVAL_SECONDS = 6.0
 EXPORT_DEBUG_MAX_BUNDLES = 12
 EXPORT_DEBUG_DIRNAME = "debug_export_captures"
-FAST_SUMMARY_OCR_TIMEOUT_SECONDS = 0.9
+FAST_SUMMARY_OCR_TIMEOUT_SECONDS = 3.0
 WINDOWS_OCR_TIMEOUT_SECONDS = 2.0
 CREATIVE_TRANSFER_SUMMARY_SENTINEL = -1001
 CENTERED_DIALOG_SCAN_REGIONS = [
@@ -260,7 +260,7 @@ try {
 
     try:
         completed = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
+            ["powershell", "-NoProfile", "-NoLogo", "-Command", script],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -955,7 +955,7 @@ def run_windows_ocr(
     try:
         started = time.monotonic()
         completed = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
+            ["powershell", "-NoProfile", "-NoLogo", "-Command", script],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -2681,10 +2681,32 @@ class ProcessMonitor(QThread):
             return 0.0
         return time.monotonic() - self._last_heartbeat
 
+    @staticmethod
+    def _warmup_powershell():
+        """预热 PowerShell 引擎，减少后续 OCR 调用的冷启动耗时。"""
+        try:
+            startupinfo = None
+            if hasattr(subprocess, "STARTUPINFO"):
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+            started = time.monotonic()
+            subprocess.run(
+                ["powershell", "-NoProfile", "-NoLogo", "-Command", "exit 0"],
+                capture_output=True,
+                timeout=10.0,
+                startupinfo=startupinfo,
+            )
+            elapsed = time.monotonic() - started
+            logger.info("PowerShell 预热完成，耗时 %.2f 秒", elapsed)
+        except Exception as exc:
+            logger.debug("PowerShell 预热未完成: %s", exc)
+
     def run(self):
         """监控主循环"""
         if self._monitor_started_at is None:
             self._monitor_started_at = time.monotonic()
+            self._warmup_powershell()
         while self._running:
             now = time.monotonic()
             self._last_heartbeat = now

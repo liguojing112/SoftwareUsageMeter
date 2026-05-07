@@ -1,5 +1,32 @@
 # SoftwareUsageMeter 变更摘要
 
+## 2026-05-07 OCR 诊断日志增强与 Win10 超时修复
+
+### 1. OCR 调用链诊断日志
+
+**背景：** 雇主 Win10 电脑上 OCR 无法识别张数，但 Windows OCR 引擎本身正常，问题出在 Python 调用 PowerShell 的链路上。原日志覆盖不足，无法定位具体失败环节。
+
+**改动：**
+- `run_windows_ocr()` 增加 5 条诊断日志：调用开始（debug）、超时（warning）、返回码异常（warning 含 returncode/stdout/stderr/耗时）、输出为空（warning 含 stderr）、成功（debug 含耗时和文本长度）
+- 所有日志均包含图片路径和实际耗时，便于排查
+
+### 2. Win10 PowerShell 超时修复
+
+**背景：** 雇主 Win10 上 PowerShell 冷启动比 Win11 慢 2-3 倍，居中对话框扫描 OCR 超时设为 0.9 秒，导致全部扫描调用超时失败。
+
+**改动：**
+- `FAST_SUMMARY_OCR_TIMEOUT_SECONDS` 从 0.9 秒提高到 3.0 秒
+- 监控线程启动时执行 PowerShell 预热（`_warmup_powershell()`），消除后续 OCR 调用的冷启动延迟
+- 所有 PowerShell 调用添加 `-NoLogo` 参数，减少启动耗时
+
+### 3. OCR 语言包安装指引增强
+
+**改动：**
+- 语言包缺失时的日志提示从一种安装方式扩展为三种：
+  - 方式一：设置 > 语言 > 中文(简体) > 选项 > 基本输入/OCR
+  - 方式二：设置 > 应用 > 可选功能 > 添加功能 > 搜索"光学字符识别"
+  - 方式三：管理员 PowerShell 执行 `Add-WindowsCapability`
+
 ## 2026-04-26 启动守卫与导出张数安全更新
 
 ### 1. 启动阶段轻量守卫
