@@ -1181,10 +1181,10 @@ def _prepare_export_count_ocr_variants(
             relative_regions.append(("header_and_counts", (0.0, 0.0, 0.94, 0.34)))
     else:
         relative_regions = [
-            ("summary_popup_title", (0.03, 0.02, 0.45, 0.18)),
-            ("summary_popup_title_wide", (0.02, 0.02, 0.58, 0.20)),
-            ("summary", (0.02, 0.08, 0.52, 0.24)),
-            ("summary_center", (0.18, 0.12, 0.66, 0.30)),
+            ("summary_popup_title", (0.03, 0.02, 0.68, 0.18)),
+            ("summary_popup_title_wide", (0.02, 0.02, 0.80, 0.20)),
+            ("summary", (0.02, 0.08, 0.72, 0.24)),
+            ("summary_center", (0.18, 0.12, 0.78, 0.30)),
             ("type_counts", (0.02, 0.18, 0.78, 0.37)),
         ]
         if not cache_mode:
@@ -1463,7 +1463,7 @@ def detect_export_summary_count_from_image(
             "summary-rgb2x": 7,
         }
         variants.sort(key=lambda item: fast_variant_priority.get(item[0], 100))
-        variants = variants[:4]
+        variants = variants[:6]
 
     for variant_name, variant in variants:
         temp_path = None
@@ -1541,6 +1541,7 @@ def detect_export_image_count_from_image(
     )
     logger.debug(f"总共 {len(variants)} 个图像变体用于OCR")
     fallback_candidates: dict[int, list[str]] = {}
+    _ocr_samples: list[str] = []
 
     for i, (variant_name, variant) in enumerate(variants):
         temp_path = None
@@ -1568,6 +1569,9 @@ def detect_export_image_count_from_image(
                     os.remove(temp_path)
                 except OSError:
                     pass
+
+        if len(_ocr_samples) < 5 and ocr_text:
+            _ocr_samples.append(f"{variant_name}: {normalize_ocr_text(ocr_text)[:120]}")
 
         explicit_export_count = extract_export_image_count_from_text(
             ocr_text, allow_numeric_fallback=False
@@ -1619,7 +1623,13 @@ def detect_export_image_count_from_image(
     if explicit_only or cache_mode:
         logger.debug("所有图像变体均未识别到导出张数")
     else:
-        logger.warning("所有图像变体均未识别到导出张数")
+        if _ocr_samples:
+            logger.info(
+                "所有图像变体均未识别到导出张数，OCR样本: %s",
+                " | ".join(_ocr_samples),
+            )
+        else:
+            logger.warning("所有图像变体均未识别到导出张数，且无OCR文本")
     return None
 
 
